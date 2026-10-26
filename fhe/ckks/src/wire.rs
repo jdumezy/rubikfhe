@@ -139,10 +139,10 @@ pub fn read_eval_keys_into<R: Read>(r: &mut R, ring: &Ring, sink: &mut impl KeyS
     if !read_flag(r)? {
         return Ok(false);
     }
-    let (Some(b), Some(preset)) = (&ring.bootstrap, &p.bootstrap) else {
+    let (Some(_), Some(preset)) = (&ring.bootstrap, &p.bootstrap) else {
         return Err(invalid("bootstrapping keys for parameters without bootstrapping").into());
     };
-    let (m, layout) = (&b.module, preset.keys_layout());
+    let (m, layout) = (module, &preset.keys_layout);
     for _ in 0..read_u64(r)? {
         let g = read_u64(r)? as i64;
         sink.bootstrap_rotation_key(

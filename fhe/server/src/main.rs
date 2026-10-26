@@ -203,8 +203,8 @@ fn main() -> Result<()> {
         solver,
         ckks: Ckks { plan, prepared, engine: RwLock::new(engine), key_id: Mutex::new(None), output_tokens },
         progress: Mutex::new(None),
-        // The secure parameters bootstrap 3 times and clean 4 times.
-        last_report: Mutex::new((3, 4)),
+        // The secure parameters bootstrap twice; their bootstraps also clean.
+        last_report: Mutex::new((2, 0)),
     });
     let listener = TcpListener::bind(&addr)?;
     eprintln!("listening on {addr}");

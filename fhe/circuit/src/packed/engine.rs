@@ -42,6 +42,11 @@ pub trait Engine: Sync {
     fn plaintext_cost(&self) -> usize;
     /// Capacity that must remain for a refresh to be possible.
     fn refresh_reserve(&self) -> usize;
+    /// Whether a refresh also rounds the values back to 0/1, so the circuit
+    /// needs no separate cleaning.
+    fn refresh_cleans(&self) -> bool {
+        false
+    }
     fn refresh(&self, a: &Self::Ct) -> Result<Self::Ct>;
 }
 

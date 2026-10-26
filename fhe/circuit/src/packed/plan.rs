@@ -60,11 +60,24 @@ pub fn family_index(o: Orientation) -> usize {
     }
 }
 
+/// Block of tracked cubie `r`. With several blocks per ciphertext, edges take
+/// the even blocks and corners the odd ones, so every gather map repeats every
+/// two blocks: its diagonals are stored and encoded as one 2048-slot period.
+fn block_of(layout: &Layout, r: usize) -> usize {
+    if layout.blocks_per_ct < 2 {
+        return r;
+    }
+    match Cubie::TRACKED[r] {
+        Cubie::Edge(e) => 2 * e,
+        Cubie::Corner(c) => 2 * c + 1,
+    }
+}
+
 impl PackedPlan {
     pub fn new(tables: &Tables, slots: usize) -> PackedPlan {
         let layout = Layout::new(slots);
-        let cubies = Cubie::TRACKED.len();
-        let state_cts = layout.cts_for(cubies);
+        let blocks = (0..Cubie::TRACKED.len()).map(|r| block_of(&layout, r)).max().unwrap() + 1;
+        let state_cts = layout.cts_for(blocks);
         let zeros = || vec![0.0; slots];
 
         // Token blocks are handed out per family, in stage order.
@@ -90,7 +103,7 @@ impl PackedPlan {
             .map(|(i, stage)| {
                 let o = Orientation::of_stage(i);
 
-                let (ct, base) = layout.place(i);
+                let (ct, base) = layout.place(block_of(&layout, i));
                 let mut isolate = zeros();
                 for v in 0..LOCATIONS {
                     for w in 0..SIDE {
@@ -118,23 +131,29 @@ impl PackedPlan {
                 let mut gather = Vec::new();
                 let mut keep_state = Vec::new();
                 if !last {
+                    // One period of the block pattern: edge then corner when
+                    // interleaved, else the ciphertext's single cubie.
+                    let period = if layout.blocks_per_ct < 2 { 1 } else { 2 };
                     for c in 0..state_cts {
                         let mut diagonals = Diagonals::new();
-                        let mut keep = zeros();
-                        for b in 0..layout.blocks_per_ct {
-                            let Some(&cubie) = Cubie::TRACKED.get(c * layout.blocks_per_ct + b) else { continue };
+                        for b in 0..period {
+                            let edge = if period == 2 { b == 0 } else { Cubie::TRACKED[c].is_edge() };
                             let base = b * BLOCK;
-                            for z in 0..LOCATIONS {
-                                keep[base + o.at(0, z)] = 1.0;
-                            }
                             for (k, &a) in stage.orbit.iter().enumerate() {
-                                let map = stage.location_map(k, cubie.is_edge());
+                                let map = stage.location_map(k, edge);
                                 for (y, &z) in map.iter().enumerate() {
                                     let z = z as usize;
                                     let offset = (a as i64 - y as i64) * o.step() as i64;
                                     let d = offset.rem_euclid(slots as i64) as usize;
-                                    diagonals.entry(d).or_insert_with(zeros)[base + o.at(y, z)] = 1.0;
+                                    diagonals.entry(d).or_insert_with(|| vec![0.0; period * BLOCK])
+                                        [base + o.at(y, z)] = 1.0;
                                 }
+                            }
+                        }
+                        let mut keep = zeros();
+                        for block in 0..layout.blocks_per_ct {
+                            for z in 0..LOCATIONS {
+                                keep[block * BLOCK + o.at(0, z)] = 1.0;
                             }
                         }
                         gather.push(diagonals);
@@ -142,7 +161,7 @@ impl PackedPlan {
                     }
                 }
                 let keep_next = (!last).then(|| {
-                    let (ct, base) = layout.place(i + 1);
+                    let (ct, base) = layout.place(block_of(&layout, i + 1));
                     let mut keep = zeros();
                     for z in 0..LOCATIONS {
                         keep[base + o.at(0, z)] = 1.0;
@@ -166,7 +185,7 @@ impl PackedPlan {
         let mut u = vec![vec![0.0; self.layout.slots]; self.state_cts];
         let mut v = u.clone();
         for (r, cubie) in Cubie::TRACKED.iter().enumerate() {
-            let (ct, base) = self.layout.place(r);
+            let (ct, base) = self.layout.place(block_of(&self.layout, r));
             for x in 0..LOCATIONS {
                 let (first, second) = match *cubie {
                     Cubie::Edge(p) => {

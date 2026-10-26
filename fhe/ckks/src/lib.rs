@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod engine;
+pub mod functional;
 pub mod params;
 pub mod system;
 pub mod wire;

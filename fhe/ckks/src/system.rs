@@ -6,14 +6,14 @@ use anyhow::{Result, bail};
 const X86_MAX_THREADS: usize = 16;
 
 /// Machine memory the server asks for with the secure parameters. Measured on
-/// an M5 Pro: it peaks at 21.5 GB of footprint while receiving and preparing
-/// the keys (each key is prepared as it arrives), then holds 19 GB.
-pub const SERVER_MIN_MEMORY: u64 = 24 << 30;
+/// an M5 Pro: it peaks at 10.2 GB while solving, with its 3 GB of keys
+/// prepared (each key is prepared as it arrives).
+pub const SERVER_MIN_MEMORY: u64 = 12 << 30;
 
-/// Machine memory the client asks for: it peaks at 8.6 GB while generating its
+/// Machine memory the client asks for: it peaks at 3.8 GB while generating its
 /// keys, and drops them once they are uploaded. Running both processes and a
-/// browser on one machine, 32 GiB are comfortable.
-pub const CLIENT_MIN_MEMORY: u64 = 12 << 30;
+/// browser on one machine, 16 GiB suffice and 24 GiB are comfortable.
+pub const CLIENT_MIN_MEMORY: u64 = 6 << 30;
 
 /// Sizes the global Rayon pool the poulpy backends run on, unless
 /// `RAYON_NUM_THREADS` is set. Returns the number of worker threads.

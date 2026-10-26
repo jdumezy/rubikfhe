@@ -39,6 +39,3 @@ mod chosen {
 }
 
 pub use chosen::{Be, NAME};
-
-/// The conjugate-invariant twin of [`Be`], on which the bootstrap runs EvalMod.
-pub type BeCi = <poulpy_hal::layouts::Module<Be> as poulpy_ckks::api::CKKSBootstrappingCIOps<Be>>::CI;

@@ -1,24 +1,23 @@
 //! CKKS implementation of the circuit [`Engine`], on poulpy.
 //!
-//! The circuit runs on a module of degree `N`. Bootstrapping, when enabled,
-//! runs on the preset's modules of degree `2N` and `N` (conjugate-invariant).
+//! The circuit and its bootstrap run on one module of degree `N`.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use poulpy_ckks::api::{
-    CKKSAllOpsTmpBytes, CKKSBootstrappingCIOps, CKKSCopyOps, CKKSInnerSumOps, CKKSLinearTransformationOps,
+    CKKSAllOpsTmpBytes, CKKSBootstrappingOps, CKKSCopyOps, CKKSEncodingHostOps, CKKSInnerSumOps,
+    CKKSLinearTransformationOps,
 };
 use poulpy_ckks::layouts::{
-    BootstrappingContext, BootstrappingKeySet, BootstrappingKeysPrepared, CKKSCiphertextOwned, CKKSPlaintextOwned,
-    ComplexDiagonals, EncapsulationKeys, LinearTransformationPrepared,
+    BootstrappingContext, BootstrappingKeySet, BootstrappingKeysLayout, BootstrappingKeysPrepared, CKKSCiphertextOwned,
+    CKKSPlaintextOwned, ComplexDiagonals, EncapsulationKeys, EncodedLut, LinearTransformationPrepared,
 };
 use poulpy_ckks::prelude::*;
 use poulpy_ckks::reference::ckks_encode_linear_transformation_from_diagonals;
 use poulpy_core::layouts::prepared::{
-    GLWEAutomorphismKeyPrepared, GLWECIEmbedKeyPrepared, GLWECIKeyPreparedFactory, GLWECITraceKeyPrepared,
-    GLWESwitchingKeyPrepared, GLWESwitchingKeyPreparedFactory, GLWETensorKeyPrepared,
+    GLWEAutomorphismKeyPrepared, GLWESwitchingKeyPrepared, GLWESwitchingKeyPreparedFactory, GLWETensorKeyPrepared,
 };
 use poulpy_core::layouts::{
     BackendGLWEAutomorphismKey, BackendGLWEAutomorphismKeyPrepared, BackendGLWESecret, BackendGLWESecretPrepared,
@@ -27,14 +26,15 @@ use poulpy_core::layouts::{
     LinearTransformationStrategy, ModuleCoreAlloc, optimal_bsgs_giant_step, prepared::GLWESecretPreparedFactory,
 };
 use poulpy_core::layouts::{GLWEAutomorphismKey, GLWECIEmbedKey, GLWECITraceKey, GLWESwitchingKey};
-use poulpy_core::{GLWEAutomorphismKeyEncryptSk, GLWETensorKeyEncryptSk};
+use poulpy_core::layouts::{GetAutomorphismKey, TorusPrecision, prepared::GLWEAutomorphismKeyPreparedBackendRef};
+use poulpy_core::{GLWEAutomorphismKeyEncryptSk, GLWESwitchingKeyEncryptSk, GLWETensorKeyEncryptSk};
 use poulpy_hal::api::{ScratchOwnedAlloc, ScratchOwnedBorrow};
 use poulpy_hal::layouts::{Backend, CyclotomicOrder, Module, ScratchOwned};
 use poulpy_hal::source::Source;
 use rubikfhe_circuit::packed::layout::{LOG_BLOCK, LOG_SIDE};
 use rubikfhe_circuit::packed::{Diagonals, Engine, PackedPlan};
 
-use crate::backend::{Be, BeCi};
+use crate::backend::Be;
 use crate::params::Params;
 use crate::wire::{KeySink, read_eval_keys_into};
 
@@ -50,31 +50,43 @@ fn pt_meta(log_delta: usize) -> GLWEPlaintextMeta {
     GLWEPlaintextMeta { scale: Scale::Log(log_delta), slots: SlotsKind::Complex, log_sparsity: 0 }
 }
 
-/// Bootstrapping context, compiled from the preset (public).
+/// Bootstrapping context and LUT, compiled from the preset (public).
 pub struct Bootstrap {
-    pub module: Module<Be>,
-    pub ci: Module<BeCi>,
     pub context: BootstrappingContext<Be, f64>,
+    pub lut: EncodedLut<CKKSPlaintextOwned<Be>>,
 }
 
 impl Bootstrap {
-    fn new(params: &Params) -> Result<Option<Bootstrap>> {
+    fn new(module: &Module<Be>, params: &Params) -> Result<Option<Bootstrap>> {
         let Some(preset) = &params.bootstrap else { return Ok(None) };
-        let n = preset.n() as u64;
-        let (module, ci) = (Module::<Be>::new(2 * n), Module::<BeCi>::new(n));
-        let (bytes, bytes_ci) = BootstrappingContext::<Be, f64>::compile_ci_unprepared_tmp_bytes(&module, &ci);
-        let unprepared = BootstrappingContext::<Be, f64>::compile_ci_unprepared(
-            &module,
-            &ci,
-            preset.base2k().into(),
-            preset.plan(),
+        let bytes = <Module<Be> as CKKSEncodingHostOps<Be, f64>>::ckks_reim_tmp_bytes(module, module.n());
+        let unprepared = BootstrappingContext::<Be, f64>::compile_unprepared(
+            module,
+            preset.base2k.into(),
+            &preset.plan,
             &mut ScratchOwned::<Be>::alloc(bytes).borrow(),
-            &mut ScratchOwned::<BeCi>::alloc(bytes_ci).borrow(),
         )?;
-        let bytes = unprepared.prepare_tmp_bytes(&module);
-        let context = unprepared.prepare(&module, &mut ScratchOwned::<Be>::alloc(bytes).borrow());
-        Ok(Some(Bootstrap { module, ci, context }))
+        let bytes = unprepared.prepare_tmp_bytes(module);
+        let context = unprepared.prepare(module, &mut ScratchOwned::<Be>::alloc(bytes).borrow());
+        Ok(Some(Bootstrap { context, lut: preset.lut.transfer_to(module) }))
     }
+}
+
+/// Scratch to generate, and to prepare, the bootstrapping keys of `layout`.
+fn bootstrap_keys_tmp_bytes(module: &Module<Be>, layout: &BootstrappingKeysLayout) -> (usize, usize) {
+    let switching: Vec<_> =
+        layout.encapsulation.iter().flat_map(|e| [Some(e.dense_to_sparse), e.sparse_to_dense]).flatten().collect();
+    let mut generate = module.glwe_tensor_key_encrypt_sk_tmp_bytes(&layout.tensor_key);
+    let mut prepare = module.prepare_tensor_key_tmp_bytes(&layout.tensor_key);
+    for key in layout.rotation_key_layouts() {
+        generate = generate.max(module.glwe_automorphism_key_encrypt_sk_tmp_bytes(&key));
+        prepare = prepare.max(module.glwe_automorphism_key_prepare_tmp_bytes(&key));
+    }
+    for key in &switching {
+        generate = generate.max(module.glwe_switching_key_encrypt_sk_tmp_bytes(key));
+        prepare = prepare.max(module.glwe_switching_key_prepare_tmp_bytes(key));
+    }
+    (generate, prepare)
 }
 
 /// Public evaluation keys, as the client generates them.
@@ -94,7 +106,7 @@ pub struct Ring {
 impl Ring {
     pub fn new(params: Params) -> Result<Ring> {
         let module = Module::<Be>::new(params.n() as u64);
-        let bootstrap = Bootstrap::new(&params)?;
+        let bootstrap = Bootstrap::new(&module, &params)?;
         Ok(Ring { params, module, bootstrap })
     }
 
@@ -176,32 +188,37 @@ impl Ring {
         let mut tensor_key = self.module.glwe_tensor_key_alloc_from_infos(&p.tensor_key_layout());
         self.module.glwe_tensor_key_encrypt_sk(&mut tensor_key, &sk.raw, &mut xa, &mut xe, &mut scratch.borrow());
 
-        let mut rotation_keys = BTreeMap::new();
-        for &g in galois_elements {
-            let mut key = self.module.glwe_automorphism_key_alloc_from_infos(&p.rotation_key_layout());
-            self.module.glwe_automorphism_key_encrypt_sk(&mut key, g, &sk.raw, &mut xe, &mut xa, &mut scratch.borrow());
-            rotation_keys.insert(g, key);
-        }
-
         let bootstrap = match (&self.bootstrap, &p.bootstrap) {
             (Some(b), Some(preset)) => {
-                let layout = preset.keys_layout();
-                let (bytes, bytes_ci) = layout.generate_ci_tmp_bytes(&b.module, &b.ci);
+                let layout = &preset.keys_layout;
+                let (bytes, _) = bootstrap_keys_tmp_bytes(&self.module, layout);
                 let mut xs = Source::new([seed, [0xc3; 32]].concat()[8..40].try_into().unwrap());
-                Some(b.context.generate_keys_ci(
-                    &b.module,
-                    &b.ci,
+                Some(b.context.generate_keys(
+                    &self.module,
                     &sk.raw,
                     layout,
                     &mut xs,
                     &mut xe,
                     &mut xa,
                     &mut ScratchOwned::<Be>::alloc(bytes).borrow(),
-                    &mut ScratchOwned::<BeCi>::alloc(bytes_ci).borrow(),
                 )?)
             }
             _ => None,
         };
+        let mut rotation_keys = BTreeMap::new();
+        // The bootstrapping keys also serve the circuit's rotations, where their
+        // gadget covers the circuit's widest ciphertexts (some are narrower).
+        let shared = |g: i64| {
+            let Some((b, preset)) = bootstrap.as_ref().zip(p.bootstrap.as_ref()) else { return false };
+            let layout = preset.keys_layout.rotation_key(g);
+            b.rotation_keys.contains_key(&g) && (layout.dnum.0 * layout.k_digit.0) as usize >= p.fresh_k
+        };
+        for &g in galois_elements.iter().filter(|&&g| !shared(g)) {
+            let mut key = self.module.glwe_automorphism_key_alloc_from_infos(&p.rotation_key_layout());
+            self.module.glwe_automorphism_key_encrypt_sk(&mut key, g, &sk.raw, &mut xe, &mut xa, &mut scratch.borrow());
+            rotation_keys.insert(g, key);
+        }
+
         Ok(EvalKeys { tensor_key, rotation_keys, bootstrap })
     }
 
@@ -243,36 +260,51 @@ impl Ring {
 pub struct PreparedKeys {
     tensor_key: BackendGLWETensorKeyPrepared<Be>,
     rotation_keys: std::collections::HashMap<i64, BackendGLWEAutomorphismKeyPrepared<Be>>,
-    bootstrap: Option<BootstrappingKeysPrepared<Buf, Be, BeCi>>,
+    bootstrap: Option<BootstrappingKeysPrepared<Buf, Be>>,
 }
 
 /// The CKKS [`Engine`]: a ring with prepared evaluation keys.
 pub struct CkksEngine {
     pub ring: Ring,
     keys: Option<PreparedKeys>,
-    /// Scratch arena and its size, grown to the largest linear transformation.
+    /// One scratch arena, and its size, for everything that runs on the
+    /// backend: circuit operations, bootstrapping and key preparation never
+    /// overlap, so they share the largest arena any of them needs.
     scratch: Mutex<(usize, ScratchOwned<Be>)>,
-    bootstrap_scratch: Option<Mutex<(ScratchOwned<Be>, ScratchOwned<BeCi>)>>,
 }
 
 impl CkksEngine {
     pub fn new(ring: Ring) -> CkksEngine {
-        let scratch = Mutex::new((0, ring.scratch()));
-        let bootstrap_scratch = ring.bootstrap.as_ref().zip(ring.params.bootstrap.as_ref()).map(|(b, preset)| {
-            let (bytes, bytes_ci) = b.module.ckks_bootstrap_ci_tmp_bytes(
-                &b.ci,
-                &preset.bootstrap_layout(),
-                &preset.input_layout(),
-                &b.context,
-                preset.keys_layout(),
-            );
-            Mutex::new((ScratchOwned::<Be>::alloc(bytes), ScratchOwned::<BeCi>::alloc(bytes_ci)))
-        });
-        CkksEngine { ring, keys: None, scratch, bootstrap_scratch }
+        let bytes = ring.bootstrap.as_ref().zip(ring.params.bootstrap.as_deref()).map_or(
+            ring.scratch_bytes(),
+            |(b, preset)| {
+                let ct = |k: usize| {
+                    let mut layout = ring.params.glwe_layout();
+                    layout.k = k.into();
+                    ring.module.ckks_ciphertext_alloc_from_glwe_infos(&layout)
+                };
+                let boot = ring.module.ckks_functional_bootstrap_tmp_bytes(
+                    &ct(preset.bootstrap_k),
+                    &ct(preset.input_k),
+                    &b.context,
+                    std::slice::from_ref(&b.lut),
+                    &preset.keys_layout,
+                );
+                let (_, prepare) = bootstrap_keys_tmp_bytes(&ring.module, &preset.keys_layout);
+                ring.scratch_bytes().max(boot).max(prepare)
+            },
+        );
+        let scratch = Mutex::new((bytes, ScratchOwned::<Be>::alloc(bytes)));
+        CkksEngine { ring, keys: None, scratch }
     }
 
     pub fn has_keys(&self) -> bool {
         self.keys.is_some()
+    }
+
+    /// Bytes of the scratch arena.
+    pub fn scratch_size(&self) -> usize {
+        self.scratch.lock().unwrap().0
     }
 
     /// Grows the scratch arena to at least `bytes` on top of the base arena.
@@ -281,6 +313,12 @@ impl CkksEngine {
         if guard.0 < bytes {
             *guard = (bytes, ScratchOwned::<Be>::alloc(bytes.max(self.ring.scratch_bytes())));
         }
+    }
+
+    /// The circuit's rotation keys, falling back on the bootstrapping keys.
+    fn rotations(&self) -> Result<Rotations<'_>> {
+        let keys = self.keys()?;
+        Ok(Rotations { own: &keys.rotation_keys, shared: keys.bootstrap.as_ref().map(|b| &b.rotation_keys) })
     }
 
     fn keys(&self) -> Result<&PreparedKeys> {
@@ -321,7 +359,7 @@ impl Engine for CkksEngine {
             re.set(i as i64, values.clone());
         }
         let indexes: Vec<i64> = diagonals.keys().map(|&i| i as i64).collect();
-        let (prepared, plan) = {
+        let (lt, plan) = {
             let mut guard = self.scratch.lock().unwrap();
             let scratch = &mut guard.1;
             let lt = ckks_encode_linear_transformation_from_diagonals(
@@ -334,11 +372,10 @@ impl Engine for CkksEngine {
                 &mut scratch.borrow(),
             )?;
             let first = lt.first_diagonal_plaintext().context("empty gather map")?;
-            let plan = lt.index();
             let mut prepared =
-                LinearTransformationPrepared::<Be>::alloc_prepared_from_index(&self.ring.module, &plan, first);
+                LinearTransformationPrepared::<Be>::alloc_prepared_from_index(&self.ring.module, &lt.index(), first);
             self.ring.module.ckks_prepare_linear_transformation_rhs(&mut prepared, &lt, &mut scratch.borrow());
-            (prepared, plan)
+            (prepared, lt.index())
         };
         let ct = self.ring.module.ckks_ciphertext_alloc_from_glwe_infos(&p.glwe_layout());
         let atk = p.rotation_key_layout();
@@ -349,7 +386,7 @@ impl Engine for CkksEngine {
                 .max(module.ckks_prepare_linear_transformation_baby_steps_tmp_bytes(&ct, &plan, &atk))
                 + self.ring.scratch_bytes(),
         );
-        Ok(prepared)
+        Ok(lt)
     }
 
     fn mul(&self, a: &Ciphertext, b: &Ciphertext) -> Result<Ciphertext> {
@@ -385,7 +422,7 @@ impl Engine for CkksEngine {
             &mut out,
             a,
             lt,
-            &self.keys()?.rotation_keys,
+            &self.rotations()?,
             &mut scratch.borrow(),
         )?;
         Ok(out)
@@ -400,7 +437,7 @@ impl Engine for CkksEngine {
             log_batch,
             log_count,
             false,
-            &self.keys()?.rotation_keys,
+            &self.rotations()?,
             &mut scratch.borrow(),
         )?;
         Ok(out)
@@ -414,7 +451,7 @@ impl Engine for CkksEngine {
             a,
             log_batch,
             log_count,
-            &self.keys()?.rotation_keys,
+            &self.rotations()?,
             &mut scratch.borrow(),
         )?;
         Ok(out)
@@ -440,28 +477,41 @@ impl Engine for CkksEngine {
         self.ring.params.refresh_reserve()
     }
 
+    fn refresh_cleans(&self) -> bool {
+        self.ring.bootstrap.is_some()
+    }
+
+    /// Functional bootstrap: relabels the input at a higher scale, where the
+    /// bootstrap's own error is smaller, refreshes it through the LUT
+    /// `0 → 0, 1 → 1`, and relabels the output back at the circuit's scale.
     fn refresh(&self, a: &Ciphertext) -> Result<Ciphertext> {
         let (Some(b), Some(preset), Some(keys)) =
             (&self.ring.bootstrap, &self.ring.params.bootstrap, &self.keys()?.bootstrap)
         else {
             anyhow::bail!("out of capacity and these parameters do not bootstrap");
         };
-        let scratch = self.bootstrap_scratch.as_ref().unwrap();
-        let (scratch, scratch_ci) = &mut *scratch.lock().unwrap();
-        let mut input = b.module.ckks_ciphertext_alloc_from_glwe_infos(&preset.input_layout());
-        b.module.ckks_copy(&mut input, a, &mut scratch.borrow())?;
-        let mut output = b.module.ckks_ciphertext_alloc_from_glwe_infos(&preset.bootstrap_layout());
-        output.set_k(preset.bootstrap_k().into());
-        b.module.ckks_bootstrap_ci_into(
-            &b.ci,
-            &mut output,
+        let (module, log_delta) = (&self.ring.module, self.ring.params.log_delta);
+        let scratch = &mut self.scratch.lock().unwrap().1;
+        // The budget the bootstrap reads, at the circuit's scale; the relabel
+        // keeps the budget and widens the ciphertext to the bootstrap's input.
+        let mut input = self.alloc_like(preset.input_k - (preset.log_delta - log_delta));
+        module.ckks_copy(&mut input, a, &mut scratch.borrow())?;
+        input.set_log_delta(preset.log_delta);
+        // The values are real: the bootstrap skips the imaginary half.
+        input.set_slots(SlotsKind::Real);
+        let mut outputs = [self.alloc_like(preset.bootstrap_k)];
+        module.ckks_functional_bootstrap(
+            &mut outputs,
             &input,
             &b.context,
+            std::slice::from_ref(&b.lut),
             keys,
             &mut scratch.borrow(),
-            &mut scratch_ci.borrow(),
         )?;
-        Ok(output)
+        let [mut out] = outputs;
+        out.set_log_delta(log_delta);
+        out.set_slots(SlotsKind::Complex);
+        Ok(out)
     }
 }
 
@@ -469,47 +519,39 @@ impl Engine for CkksEngine {
 /// never pile up next to their prepared form.
 struct Preparing<'a> {
     ring: &'a Ring,
-    scratch: ScratchOwned<Be>,
-    boot_scratch: Option<(ScratchOwned<Be>, ScratchOwned<BeCi>)>,
+    scratch: &'a mut ScratchOwned<Be>,
     tensor_key: Option<BackendGLWETensorKeyPrepared<Be>>,
     rotation_keys: std::collections::HashMap<i64, BackendGLWEAutomorphismKeyPrepared<Be>>,
     boot_rotation_keys: std::collections::HashMap<i64, GLWEAutomorphismKeyPrepared<Buf, Be>>,
-    boot_tensor_key: Option<GLWETensorKeyPrepared<Buf, BeCi>>,
+    boot_tensor_key: Option<GLWETensorKeyPrepared<Buf, Be>>,
     encapsulation: Option<EncapsulationKeys<GLWESwitchingKeyPrepared<Buf, Be>>>,
     first_factor_keys: std::collections::HashMap<i64, GLWESwitchingKeyPrepared<Buf, Be>>,
-    conversion: Option<(GLWECITraceKeyPrepared<Buf, Be>, GLWECIEmbedKeyPrepared<Buf, Be>)>,
 }
 
 impl<'a> Preparing<'a> {
-    fn new(ring: &'a Ring) -> Preparing<'a> {
-        let boot_scratch = ring.bootstrap.as_ref().zip(ring.params.bootstrap.as_ref()).map(|(b, preset)| {
-            let (bytes, bytes_ci) = preset.keys_layout().prepare_ci_tmp_bytes(&b.module, &b.ci);
-            (ScratchOwned::<Be>::alloc(bytes), ScratchOwned::<BeCi>::alloc(bytes_ci))
-        });
+    fn new(ring: &'a Ring, scratch: &'a mut ScratchOwned<Be>) -> Self {
         Preparing {
             ring,
-            scratch: ring.scratch(),
-            boot_scratch,
+            scratch,
             tensor_key: None,
             rotation_keys: Default::default(),
             boot_rotation_keys: Default::default(),
             boot_tensor_key: None,
             encapsulation: None,
             first_factor_keys: Default::default(),
-            conversion: None,
         }
     }
 
-    fn boot(&mut self) -> Result<(&'a Bootstrap, &mut ScratchOwned<Be>, &mut ScratchOwned<BeCi>)> {
-        let b = self.ring.bootstrap.as_ref().context("bootstrapping keys for parameters without bootstrapping")?;
-        let (scratch, scratch_ci) = self.boot_scratch.as_mut().context("no bootstrapping scratch")?;
-        Ok((b, scratch, scratch_ci))
+    /// The module, for a bootstrapping key.
+    fn boot(&self) -> Result<&'a Module<Be>> {
+        self.ring.bootstrap.as_ref().context("bootstrapping keys for parameters without bootstrapping")?;
+        Ok(&self.ring.module)
     }
 
     fn switching_key(&mut self, key: &GLWESwitchingKey<Buf, Word>) -> Result<GLWESwitchingKeyPrepared<Buf, Be>> {
-        let (b, scratch, _) = self.boot()?;
-        let mut prepared = b.module.glwe_switching_key_prepared_alloc_from_infos(key);
-        b.module.glwe_switching_key_prepare(&mut prepared, key, &mut scratch.borrow());
+        let module = self.boot()?;
+        let mut prepared = module.glwe_switching_key_prepared_alloc_from_infos(key);
+        module.glwe_switching_key_prepare(&mut prepared, key, &mut self.scratch.borrow());
         Ok(prepared)
     }
 
@@ -520,7 +562,7 @@ impl<'a> Preparing<'a> {
                 tensor_key: self.boot_tensor_key.context("missing bootstrapping tensor key")?,
                 encapsulation_keys: self.encapsulation,
                 first_factor_keys: self.first_factor_keys,
-                conversion_keys: Some(self.conversion.context("missing conversion keys")?),
+                conversion_keys: None,
             })
         } else {
             None
@@ -555,17 +597,17 @@ impl KeySink for Preparing<'_> {
     }
 
     fn bootstrap_rotation_key(&mut self, galois: i64, key: GLWEAutomorphismKey<Buf, Word>) -> Result<()> {
-        let (b, scratch, _) = self.boot()?;
-        let mut prepared = b.module.glwe_automorphism_key_prepared_alloc_from_infos(&key);
-        b.module.glwe_automorphism_key_prepare(&mut prepared, &key, &mut scratch.borrow());
+        let module = self.boot()?;
+        let mut prepared = module.glwe_automorphism_key_prepared_alloc_from_infos(&key);
+        module.glwe_automorphism_key_prepare(&mut prepared, &key, &mut self.scratch.borrow());
         self.boot_rotation_keys.insert(galois, prepared);
         Ok(())
     }
 
     fn bootstrap_tensor_key(&mut self, key: GLWETensorKey<Buf, Word>) -> Result<()> {
-        let (b, _, scratch_ci) = self.boot()?;
-        let mut prepared = b.ci.alloc_tensor_key_prepared_from_infos(&key);
-        b.ci.prepare_tensor_key(&mut prepared, &key, &mut scratch_ci.borrow());
+        let module = self.boot()?;
+        let mut prepared = module.alloc_tensor_key_prepared_from_infos(&key);
+        module.prepare_tensor_key(&mut prepared, &key, &mut self.scratch.borrow());
         self.boot_tensor_key = Some(prepared);
         Ok(())
     }
@@ -587,21 +629,16 @@ impl KeySink for Preparing<'_> {
         Ok(())
     }
 
-    fn conversion_keys(&mut self, trace: GLWECITraceKey<Buf, Word>, embed: GLWECIEmbedKey<Buf, Word>) -> Result<()> {
-        let (b, scratch, _) = self.boot()?;
-        let mut trace_key = b.module.glwe_ci_trace_key_prepared_alloc_from_infos(&trace);
-        b.module.glwe_ci_key_prepare(&mut trace_key, &trace, &mut scratch.borrow());
-        let mut embed_key = b.module.glwe_ci_embed_key_prepared_alloc_from_infos(&embed);
-        b.module.glwe_ci_key_prepare(&mut embed_key, &embed, &mut scratch.borrow());
-        self.conversion = Some((trace_key, embed_key));
-        Ok(())
+    fn conversion_keys(&mut self, _: GLWECITraceKey<Buf, Word>, _: GLWECIEmbedKey<Buf, Word>) -> Result<()> {
+        anyhow::bail!("conversion keys for a bootstrap on the standard ring")
     }
 }
 
 impl CkksEngine {
     /// Reads a key stream and prepares every key as it arrives.
     pub fn prepare_keys_from<R: std::io::Read>(&self, r: &mut R) -> Result<PreparedKeys> {
-        let mut sink = Preparing::new(&self.ring);
+        let mut guard = self.scratch.lock().unwrap();
+        let mut sink = Preparing::new(&self.ring, &mut guard.1);
         let bootstrap = read_eval_keys_into(r, &self.ring, &mut sink)?;
         sink.finish(bootstrap)
     }
@@ -609,5 +646,24 @@ impl CkksEngine {
     /// Installs prepared keys, or drops the current ones with `None`.
     pub fn set_keys(&mut self, keys: Option<PreparedKeys>) {
         self.keys = keys;
+    }
+}
+
+/// Rotation keys of the circuit, then those of the bootstrap.
+struct Rotations<'a> {
+    own: &'a std::collections::HashMap<i64, BackendGLWEAutomorphismKeyPrepared<Be>>,
+    shared: Option<&'a std::collections::HashMap<i64, GLWEAutomorphismKeyPrepared<Buf, Be>>>,
+}
+
+impl GetAutomorphismKey<Be> for Rotations<'_> {
+    fn lookup_automorphism_key(
+        &self,
+        p: i64,
+        k: TorusPrecision,
+    ) -> poulpy_core::Result<GLWEAutomorphismKeyPreparedBackendRef<'_, Be>> {
+        match self.shared {
+            Some(shared) if !self.own.contains_key(&p) => shared.lookup_automorphism_key(p, k),
+            _ => self.own.lookup_automorphism_key(p, k),
+        }
     }
 }

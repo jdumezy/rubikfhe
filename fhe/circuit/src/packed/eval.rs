@@ -66,7 +66,7 @@ pub struct Report {
 
 /// Errors on the one-hot vectors double every stage (the selector and the
 /// state carry the same error into a bilinear map), so the state is cleaned
-/// this often.
+/// this often, unless the engine's refreshes clean it.
 pub const CLEAN_EVERY: usize = 4;
 
 /// Smoothstep `3x² − 2x³`: fixes 0 and 1 with zero slope, squaring small errors.
@@ -116,7 +116,7 @@ pub fn evaluate_inspected<E: Engine>(
 
     for (i, stage) in plan.stages.iter().enumerate() {
         let o = stage.orientation;
-        let cleaning = i > 0 && i % CLEAN_EVERY == 0 && !stage.gather.is_empty();
+        let cleaning = !engine.refresh_cleans() && i > 0 && i % CLEAN_EVERY == 0 && !stage.gather.is_empty();
         // The last stage only emits tokens: one plaintext product of the selector.
         let stage_cost = if stage.gather.is_empty() { engine.plaintext_cost() } else { engine.stage_cost() };
         let cost = stage_cost + if cleaning { engine.clean_cost() } else { 0 };
