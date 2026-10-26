@@ -25,7 +25,7 @@ import {
 /** Sticker colors, indexed like FACES (U R F D L B). */
 export const STICKER_COLORS = ["#f4f4f5", "#dc2626", "#16a34a", "#facc15", "#f97316", "#2563eb"];
 
-export type MoveSource = "user" | "scramble";
+export type MoveSource = "user" | "scramble" | "solver";
 
 export interface MoveEventDetail {
   move: Move;
@@ -59,7 +59,7 @@ type Pointer =
   | { mode: "turn"; id: number; x: number; y: number; pos: Vec3; normal: Vec3; point: THREE.Vector3 }
   | { mode: "spent"; id: number };
 
-const QUARTER_TURN_MS = { user: 170, scramble: 70 } as const;
+const QUARTER_TURN_MS = { user: 170, scramble: 70, solver: 280 } as const;
 const DRAG_THRESHOLD_PX = 10;
 const ORBIT_SPEED = 0.008;
 const MAX_PITCH = 1.35;
@@ -91,6 +91,7 @@ export class CubeView extends EventTarget {
   private queue: QueuedMove[] = [];
   private active: ActiveTurn | null = null;
   private pointer: Pointer | null = null;
+  private turnsLocked = false;
 
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
@@ -167,10 +168,17 @@ export class CubeView extends EventTarget {
 
   /** Drops pending moves, cancels the running animation and shows `state`. */
   setState(state: CubieState): void {
+    const wasBusy = this.busy;
     this.queue = [];
     if (this.active) this.endTurn(false);
     this.state = state;
     this.paint();
+    if (wasBusy) this.dispatchEvent(new Event("idle"));
+  }
+
+  /** While locked, dragging a face rotates the view instead of turning it. */
+  setTurnsLocked(locked: boolean): void {
+    this.turnsLocked = locked;
   }
 
   stats(): RenderStats {
@@ -260,6 +268,7 @@ export class CubeView extends EventTarget {
       if (t >= 1) {
         this.endTurn(true);
         if (this.queue.length > 0) this.startTurn(now);
+        else this.dispatchEvent(new Event("idle"));
       }
     }
 
@@ -310,7 +319,7 @@ export class CubeView extends EventTarget {
     if (this.pointer || e.button !== 0) return;
     const canvas = this.renderer.domElement;
     canvas.setPointerCapture(e.pointerId);
-    const hit = this.pick(e);
+    const hit = this.turnsLocked ? null : this.pick(e);
     this.pointer = hit
       ? { mode: "turn", id: e.pointerId, x: e.clientX, y: e.clientY, ...hit }
       : { mode: "orbit", id: e.pointerId, x: e.clientX, y: e.clientY };
@@ -320,7 +329,7 @@ export class CubeView extends EventTarget {
   private onPointerMove = (e: PointerEvent): void => {
     const p = this.pointer;
     if (!p || p.id !== e.pointerId) {
-      if (!p) this.renderer.domElement.style.cursor = this.pick(e) ? "pointer" : "grab";
+      if (!p) this.renderer.domElement.style.cursor = !this.turnsLocked && this.pick(e) ? "pointer" : "grab";
       return;
     }
     if (p.mode === "orbit") {

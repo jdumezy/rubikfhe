@@ -1,0 +1,11 @@
+[package]
+name = "rubikfhe-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rubikfhe-cube.workspace = true
+rubikfhe-solver.workspace = true
+rubikfhe-protocol.workspace = true
+tokio.workspace = true

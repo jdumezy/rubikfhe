@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["cube", "solver", "protocol", "client", "server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+rubikfhe-cube = { path = "cube" }
+rubikfhe-solver = { path = "solver" }
+rubikfhe-protocol = { path = "protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", features = ["use-std"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "signal"] }
+axum = "0.8"
+
+# Table generation is slow unoptimized; keep tests and dev runs usable.
+[profile.dev.package.rubikfhe-cube]
+opt-level = 3
+[profile.dev.package.rubikfhe-solver]
+opt-level = 3
