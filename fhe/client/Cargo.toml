@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 rubikfhe-cube.workspace = true
+rubikfhe-solver.workspace = true
+rubikfhe-circuit.workspace = true
+rubikfhe-ckks.workspace = true
 rubikfhe-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["cube", "solver", "protocol", "client", "server"]
+members = ["cube", "solver", "circuit", "ckks", "protocol", "client", "server"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,17 @@ license = "Apache-2.0"
 [workspace.dependencies]
 rubikfhe-cube = { path = "cube" }
 rubikfhe-solver = { path = "solver" }
+rubikfhe-circuit = { path = "circuit" }
+rubikfhe-ckks = { path = "ckks" }
+anyhow = "1"
+# poulpy main, pinned until v0.10.0 is released.
+poulpy-hal = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
+poulpy-core = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
+poulpy-ckks = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
+poulpy-cpu-arm = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
+poulpy-cpu-avx = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
+poulpy-cpu-avx512 = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
+poulpy-cpu-portable = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
 rubikfhe-protocol = { path = "protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,4 +32,6 @@ axum = "0.8"
 [profile.dev.package.rubikfhe-cube]
 opt-level = 3
 [profile.dev.package.rubikfhe-solver]
+opt-level = 3
+[profile.dev.package.rubikfhe-circuit]
 opt-level = 3

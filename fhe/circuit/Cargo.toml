@@ -1,0 +1,10 @@
+[package]
+name = "rubikfhe-circuit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+rubikfhe-cube.workspace = true
+rubikfhe-solver.workspace = true

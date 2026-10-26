@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
-const build = spawnSync("cargo", ["build", "--release", "--manifest-path", "fhe/Cargo.toml"], {
-  cwd: root,
+// Cargo runs inside fhe/ so its pinned toolchain and build flags apply.
+const build = spawnSync("cargo", ["build", "--release"], {
+  cwd: `${root}/fhe`,
   stdio: "inherit",
 });
 if (build.status !== 0) process.exit(build.status ?? 1);

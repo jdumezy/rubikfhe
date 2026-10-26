@@ -1,54 +1,71 @@
-//! rubikfhe client: holds the secret key. The browser sends it the cube, it
-//! encrypts the state, asks the server for a solution and decrypts the moves.
+//! rubikfhe client: holds the secret key. The browser sends it the cube; it
+//! encrypts the stickers, has the server evaluate the solver circuit, and
+//! decrypts the moves.
 
-mod scheme;
+mod ckks;
 
+use std::io::{BufReader, BufWriter};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::{Context, Result, bail};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use rubikfhe_cube::{Move, from_facelets, simplify};
+use ckks::{CkksClient, CkksStats, Phase};
+use rubikfhe_circuit::reference::tokens_to_moves;
+use rubikfhe_ckks::Params;
+use rubikfhe_cube::{Move, facelet_colors, from_facelets, simplify};
 use rubikfhe_protocol::{
-    DEFAULT_CLIENT_ADDR, DEFAULT_SERVER_ADDR, Request, Response, ServerInfo, read_frame, write_frame,
+    DEFAULT_CLIENT_ADDR, DEFAULT_SERVER_ADDR, Request, Response, Scheme, ServerInfo, SolveProgress, plaintext,
+    read_frame, write_frame,
 };
-use scheme::{ClientScheme, Plaintext};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::net::TcpStream;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct App {
-    scheme: Box<dyn ClientScheme>,
+    scheme: Scheme,
     server_addr: String,
-    keygen_ms: f64,
+    ckks: Option<Arc<CkksClient>>,
 }
 
 type ApiError = (StatusCode, Json<Value>);
 
-fn error(status: StatusCode, message: impl ToString) -> ApiError {
-    (status, Json(json!({ "error": message.to_string() })))
+fn error(status: StatusCode, message: impl std::fmt::Display) -> ApiError {
+    (status, Json(json!({ "error": format!("{message:#}") })))
+}
+
+fn ms(since: Instant) -> f64 {
+    since.elapsed().as_secs_f64() * 1e3
+}
+
+fn connect(addr: &str) -> Result<TcpStream> {
+    let socket = addr.to_socket_addrs()?.next().context("no address")?;
+    TcpStream::connect_timeout(&socket, CONNECT_TIMEOUT).with_context(|| format!("server unreachable at {addr}"))
 }
 
 /// One request/response round trip with the server, with sizes on the wire.
-struct Exchange {
+pub struct Exchange {
     response: Response,
     sent: usize,
     received: usize,
-    elapsed: Duration,
+    elapsed_ms: f64,
 }
 
-async fn exchange(addr: &str, request: &Request) -> std::io::Result<Exchange> {
+fn exchange(addr: &str, request: &Request) -> Result<Exchange> {
     let start = Instant::now();
-    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
-        .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connection timed out"))??;
-    let sent = write_frame(&mut stream, request).await?;
-    let (response, received) = read_frame(&mut stream).await?;
-    Ok(Exchange { response, sent, received, elapsed: start.elapsed() })
+    let stream = connect(addr)?;
+    let sent = write_frame(&mut BufWriter::new(stream.try_clone()?), request)?;
+    let (response, received) = read_frame(&mut BufReader::new(stream))?;
+    Ok(Exchange { response, sent, received, elapsed_ms: ms(start) })
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(f).await.expect("blocking task panicked")
 }
 
 // --- GET /api/status -------------------------------------------------------------
@@ -63,45 +80,43 @@ struct Status {
 struct ClientStatus {
     version: &'static str,
     scheme: &'static str,
-    keygen_ms: f64,
-    eval_key_bytes: usize,
+    backend: &'static str,
+    params: Option<String>,
+    setup: Option<Phase>,
+    keygen_ms: Option<f64>,
+    stages: Option<usize>,
+    output_tokens: Option<usize>,
 }
 
 #[derive(Serialize)]
 struct ServerStatus {
     addr: String,
     reachable: bool,
-    solver: Option<String>,
-    phases: Vec<String>,
-    phase_slots: Vec<u32>,
+    info: Option<ServerInfo>,
     error: Option<String>,
 }
 
 async fn status(State(app): State<Arc<App>>) -> Json<Status> {
+    let keyed = app.ckks.as_ref().and_then(|c| c.keyed());
     let client = ClientStatus {
         version: env!("CARGO_PKG_VERSION"),
-        scheme: app.scheme.scheme().name(),
-        keygen_ms: app.keygen_ms,
-        eval_key_bytes: app.scheme.eval_key().len(),
+        scheme: app.scheme.name(),
+        backend: rubikfhe_ckks::backend::NAME,
+        params: app.ckks.as_ref().map(|c| c.params_name.clone()),
+        setup: app.ckks.as_ref().map(|c| c.phase()),
+        keygen_ms: app.ckks.as_ref().and_then(|c| *c.keygen_ms.lock().unwrap()),
+        stages: keyed.map(|k| k.plan.stages.len()),
+        output_tokens: keyed.map(|k| k.output_tokens),
     };
-    let mut server = ServerStatus {
-        addr: app.server_addr.clone(),
-        reachable: false,
-        solver: None,
-        phases: vec![],
-        phase_slots: vec![],
-        error: None,
-    };
-    match exchange(&app.server_addr, &Request::Info).await {
-        Ok(Exchange { response: Response::Info(ServerInfo { solver, phases, phase_slots, .. }), .. }) => {
-            server.reachable = true;
-            server.solver = Some(solver);
-            server.phases = phases;
-            server.phase_slots = phase_slots;
+    let addr = app.server_addr.clone();
+    let server = blocking(move || match exchange(&addr, &Request::Info) {
+        Ok(Exchange { response: Response::Info(info), .. }) => {
+            ServerStatus { addr, reachable: true, info: Some(info), error: None }
         }
-        Ok(_) => server.error = Some("unexpected response".into()),
-        Err(e) => server.error = Some(e.to_string()),
-    }
+        Ok(_) => ServerStatus { addr, reachable: true, info: None, error: Some("unexpected response".into()) },
+        Err(e) => ServerStatus { addr, reachable: false, info: None, error: Some(format!("{e:#}")) },
+    })
+    .await;
     Json(Status { client, server })
 }
 
@@ -121,110 +136,138 @@ struct SolveResponse {
 #[derive(Serialize)]
 struct SolveStats {
     scheme: &'static str,
-    slots: usize,
-    phase_slots: Vec<u32>,
-    phase_moves: Vec<usize>,
+    output_slots: usize,
     raw_moves: usize,
     moves: usize,
-    eval_key_bytes: usize,
-    state_bytes: usize,
-    solution_bytes: usize,
     upload_bytes: usize,
     download_bytes: usize,
-    encrypt_ms: f64,
     solve_ms: f64,
     network_ms: f64,
-    decrypt_ms: f64,
     total_ms: f64,
+    #[serde(flatten)]
+    ckks: Option<CkksStats>,
 }
 
-fn ms(d: Duration) -> f64 {
-    d.as_secs_f64() * 1e3
+fn solve_blocking(app: &App, facelets: &str) -> Result<SolveResponse, ApiError> {
+    let start = Instant::now();
+    let state = from_facelets(facelets).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    let gateway = |e: anyhow::Error| error(StatusCode::BAD_GATEWAY, e);
+
+    let (raw, ckks_stats, ex): (Vec<Move>, Option<CkksStats>, Exchange) = match (app.scheme, &app.ckks) {
+        (Scheme::Ckks, Some(ckks)) => {
+            let colors = facelet_colors(facelets).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+            let (tokens, stats, ex) = ckks.solve(&app.server_addr, &colors).map_err(gateway)?;
+            (tokens_to_moves(&tokens), Some(stats), ex)
+        }
+        _ => {
+            let request =
+                Request::Solve { scheme: Scheme::Plaintext, key_id: 0, inputs: vec![plaintext::encode_state(&state)] };
+            let ex = exchange(&app.server_addr, &request).map_err(gateway)?;
+            let moves = match &ex.response {
+                Response::Solution { outputs, .. } => {
+                    plaintext::decode_moves(&outputs[0]).map_err(|e| gateway(e.into()))?
+                }
+                Response::Error(e) => return Err(gateway(anyhow::anyhow!("server: {e}"))),
+                _ => return Err(gateway(anyhow::anyhow!("unexpected response"))),
+            };
+            (moves.into_iter().flatten().collect(), None, ex)
+        }
+    };
+    let Response::Solution { outputs, solve_ms, .. } = &ex.response else { unreachable!() };
+    if !state.apply_all(&raw).is_solved() {
+        return Err(gateway(anyhow::anyhow!("the decrypted solution does not solve the cube")));
+    }
+    let moves = simplify(&raw);
+    let output_slots = match app.scheme {
+        Scheme::Ckks => app.ckks.as_ref().and_then(|c| c.keyed()).map_or(0, |k| k.output_tokens),
+        Scheme::Plaintext => outputs[0].len(),
+    };
+    let stats = SolveStats {
+        scheme: app.scheme.name(),
+        output_slots,
+        raw_moves: raw.len(),
+        moves: moves.len(),
+        upload_bytes: ex.sent,
+        download_bytes: ex.received,
+        solve_ms: *solve_ms,
+        network_ms: (ex.elapsed_ms - solve_ms).max(0.0),
+        total_ms: ms(start),
+        ckks: ckks_stats,
+    };
+    eprintln!("solved {facelets} in {} moves ({:.0} ms)", moves.len(), stats.total_ms);
+    Ok(SolveResponse { moves: moves.iter().map(Move::to_string).collect(), stats })
 }
 
 async fn solve(State(app): State<Arc<App>>, Json(req): Json<SolveRequest>) -> Result<Json<SolveResponse>, ApiError> {
-    let start = Instant::now();
-    let state = from_facelets(&req.facelets).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    blocking(move || solve_blocking(&app, &req.facelets)).await.map(Json)
+}
 
-    let t = Instant::now();
-    let ciphertext = app.scheme.encrypt_state(&state);
-    let encrypt = t.elapsed();
-    let state_bytes = ciphertext.len();
+// --- GET /api/progress -----------------------------------------------------------
 
-    let request =
-        Request::Solve { scheme: app.scheme.scheme(), eval_key: app.scheme.eval_key().to_vec(), state: ciphertext };
-    let ex = exchange(&app.server_addr, &request)
-        .await
-        .map_err(|e| error(StatusCode::BAD_GATEWAY, format!("server unreachable at {}: {e}", app.server_addr)))?;
-    let (encrypted_moves, phase_slots, solve_micros) = match ex.response {
-        Response::Solution { moves, phase_slots, solve_micros } => (moves, phase_slots, solve_micros),
-        Response::Error(e) => return Err(error(StatusCode::BAD_GATEWAY, format!("server: {e}"))),
-        Response::Info(_) => return Err(error(StatusCode::BAD_GATEWAY, "unexpected response")),
-    };
+#[derive(Serialize)]
+struct Progress {
+    step: &'static str,
+    server: Option<SolveProgress>,
+}
 
-    let t = Instant::now();
-    let slots = app.scheme.decrypt_moves(&encrypted_moves).map_err(|e| error(StatusCode::BAD_GATEWAY, e))?;
-    let decrypt = t.elapsed();
-
-    let raw: Vec<Move> = slots.iter().flatten().copied().collect();
-    if !state.apply_all(&raw).is_solved() {
-        return Err(error(StatusCode::BAD_GATEWAY, "the decrypted solution does not solve the cube"));
-    }
-    let mut offset = 0;
-    let phase_moves = phase_slots
-        .iter()
-        .map(|&n| {
-            let used = slots[offset..offset + n as usize].iter().flatten().count();
-            offset += n as usize;
-            used
+async fn progress(State(app): State<Arc<App>>) -> Json<Progress> {
+    let step = app.ckks.as_ref().map_or("idle", |c| *c.step.lock().unwrap());
+    let server = if step == "evaluating" {
+        let addr = app.server_addr.clone();
+        blocking(move || match exchange(&addr, &Request::Progress) {
+            Ok(Exchange { response: Response::Progress(p), .. }) => p,
+            _ => None,
         })
-        .collect();
-    let moves = simplify(&raw);
-    let solve = Duration::from_micros(solve_micros);
-
-    let stats = SolveStats {
-        scheme: app.scheme.scheme().name(),
-        slots: slots.len(),
-        phase_slots,
-        phase_moves,
-        raw_moves: raw.len(),
-        moves: moves.len(),
-        eval_key_bytes: app.scheme.eval_key().len(),
-        state_bytes,
-        solution_bytes: encrypted_moves.len(),
-        upload_bytes: ex.sent,
-        download_bytes: ex.received,
-        encrypt_ms: ms(encrypt),
-        solve_ms: ms(solve),
-        network_ms: ms(ex.elapsed.saturating_sub(solve)),
-        decrypt_ms: ms(decrypt),
-        total_ms: ms(start.elapsed()),
+        .await
+    } else {
+        None
     };
-    eprintln!("solved {} in {} moves ({:.1} ms)", req.facelets, moves.len(), stats.total_ms);
-    Ok(Json(SolveResponse { moves: moves.iter().map(Move::to_string).collect(), stats }))
+    Json(Progress { step, server })
 }
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<()> {
     let addr = arg("--listen").unwrap_or_else(|| DEFAULT_CLIENT_ADDR.to_string());
     let server_addr = arg("--server").unwrap_or_else(|| DEFAULT_SERVER_ADDR.to_string());
+    let scheme = match arg("--scheme").as_deref() {
+        None | Some("ckks") => Scheme::Ckks,
+        Some("plaintext") => Scheme::Plaintext,
+        Some(other) => bail!("unknown scheme {other:?} (ckks or plaintext)"),
+    };
+    let ckks = (scheme == Scheme::Ckks).then(|| -> Result<_> {
+        let params = match arg("--params").as_deref() {
+            Some("test") => Params::insecure_test(12),
+            _ => {
+                if !std::env::args().any(|a| a == "--allow-low-memory") {
+                    rubikfhe_ckks::system::ensure_memory(rubikfhe_ckks::system::CLIENT_MIN_MEMORY)?;
+                }
+                Params::secure()?
+            }
+        };
+        let threads = rubikfhe_ckks::system::init_threads();
+        eprintln!(
+            "{} backend ({threads} threads), {} parameters: preparing keys",
+            rubikfhe_ckks::backend::NAME,
+            params.name
+        );
+        Ok(CkksClient::start(params, server_addr.clone()))
+    });
+    let ckks = ckks.transpose()?;
 
-    let t = Instant::now();
-    let scheme: Box<dyn ClientScheme> = Box::new(Plaintext);
-    let keygen_ms = ms(t.elapsed());
-    eprintln!("{} scheme ready, evaluation key: {} B", scheme.scheme().name(), scheme.eval_key().len());
-
-    let app = Arc::new(App { scheme, server_addr, keygen_ms });
-    let router =
-        Router::new().route("/api/status", get(status)).route("/api/solve", post(solve)).with_state(app.clone());
-
+    let app = Arc::new(App { scheme, server_addr, ckks });
+    let router = Router::new()
+        .route("/api/status", get(status))
+        .route("/api/solve", post(solve))
+        .route("/api/progress", get(progress))
+        .with_state(app.clone());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("listening on {addr}, server at {}", app.server_addr);
+    eprintln!("listening on {addr}, server at {}, scheme {}", app.server_addr, app.scheme.name());
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
         })
-        .await
+        .await?;
+    Ok(())
 }
 
 /// Value of a `--name value` command-line argument.

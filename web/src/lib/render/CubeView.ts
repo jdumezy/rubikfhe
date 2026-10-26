@@ -159,9 +159,10 @@ export class CubeView extends EventTarget {
     return this.active !== null || this.queue.length > 0;
   }
 
-  enqueue(moves: readonly Move[], source: MoveSource = "user"): void {
+  /** Queues moves; `quarterMs` overrides the source's quarter-turn duration. */
+  enqueue(moves: readonly Move[], source: MoveSource = "user", quarterMs?: number): void {
     for (const move of moves) {
-      const quarter = QUARTER_TURN_MS[source];
+      const quarter = quarterMs ?? QUARTER_TURN_MS[source];
       this.queue.push({ move, source, duration: move.turns === 2 ? quarter * 1.5 : quarter });
     }
   }

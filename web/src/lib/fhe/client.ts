@@ -5,40 +5,68 @@
  */
 import { parseMoves, type Move } from "../cube";
 
+/** The client's CKKS setup: keys are generated, then uploaded to the server. */
+export type SetupPhase =
+  | { phase: "preparing" }
+  | { phase: "generating_keys" }
+  | { phase: "uploading"; sent_bytes: number }
+  | { phase: "ready"; key_id: number; key_bytes: number; upload_ms: number; server_prepare_ms: number }
+  | { phase: "waiting_for_server"; error: string }
+  | { phase: "failed"; error: string };
+
 export interface Status {
   client: {
     version: string;
     scheme: string;
-    keygen_ms: number;
-    eval_key_bytes: number;
+    backend: string;
+    params: string | null;
+    setup: SetupPhase | null;
+    keygen_ms: number | null;
+    stages: number | null;
+    output_tokens: number | null;
   };
   server: {
     addr: string;
     reachable: boolean;
-    solver: string | null;
-    phases: string[];
-    phase_slots: number[];
+    info: {
+      backend: string;
+      ckks_params: string;
+      key_id: number | null;
+      stages: number;
+      output_tokens: number;
+    } | null;
     error: string | null;
   };
 }
 
 export interface SolveStats {
   scheme: string;
-  slots: number;
-  phase_slots: number[];
-  phase_moves: number[];
+  output_slots: number;
   raw_moves: number;
   moves: number;
-  eval_key_bytes: number;
-  state_bytes: number;
-  solution_bytes: number;
   upload_bytes: number;
   download_bytes: number;
-  encrypt_ms: number;
   solve_ms: number;
   network_ms: number;
-  decrypt_ms: number;
   total_ms: number;
+  // CKKS only.
+  input_bytes?: number;
+  output_bytes?: number;
+  encrypt_ms?: number;
+  decrypt_ms?: number;
+  refreshes?: number;
+  cleanings?: number;
+}
+
+export interface Progress {
+  step: "idle" | "encrypting" | "evaluating" | "decrypting";
+  server: {
+    stage: number;
+    stages: number;
+    step: "decoding" | "stage" | "bootstrapping" | "cleaning" | "output";
+    fraction: number;
+    elapsed_ms: number;
+  } | null;
 }
 
 export interface SolveResult {
@@ -68,6 +96,10 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(message);
   }
   return body as T;
+}
+
+export function fetchProgress(): Promise<Progress> {
+  return call<Progress>("/api/progress");
 }
 
 export function fetchStatus(): Promise<Status> {

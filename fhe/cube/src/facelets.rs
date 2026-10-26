@@ -15,7 +15,8 @@ const D: usize = 27;
 const L: usize = 36;
 const B: usize = 45;
 
-const CORNER_FACELETS: [[usize; 3]; 8] = [
+/// Facelets of each corner position, in the cubie's reference order.
+pub const CORNER_FACELETS: [[usize; 3]; 8] = [
     [U + 8, R, F + 2],
     [U + 6, F, L + 2],
     [U, L, B + 2],
@@ -26,7 +27,8 @@ const CORNER_FACELETS: [[usize; 3]; 8] = [
     [D + 8, R + 8, B + 6],
 ];
 
-const EDGE_FACELETS: [[usize; 2]; 12] = [
+/// Facelets of each edge position, in the cubie's reference order.
+pub const EDGE_FACELETS: [[usize; 2]; 12] = [
     [U + 5, R + 1],
     [U + 7, F + 1],
     [U + 3, L + 1],
@@ -42,9 +44,9 @@ const EDGE_FACELETS: [[usize; 2]; 12] = [
 ];
 
 /// Faces of each cubie, as indices into `Face::ALL`.
-const CORNER_COLORS: [[u8; 3]; 8] =
+pub const CORNER_COLORS: [[u8; 3]; 8] =
     [[0, 1, 2], [0, 2, 4], [0, 4, 5], [0, 5, 1], [3, 2, 1], [3, 4, 2], [3, 5, 4], [3, 1, 5]];
-const EDGE_COLORS: [[u8; 2]; 12] =
+pub const EDGE_COLORS: [[u8; 2]; 12] =
     [[0, 1], [0, 2], [0, 4], [0, 5], [3, 1], [3, 2], [3, 4], [3, 5], [2, 1], [2, 4], [5, 4], [5, 1]];
 
 pub fn to_facelets(s: &CubieState) -> String {
@@ -63,6 +65,18 @@ pub fn to_facelets(s: &CubieState) -> String {
         }
     }
     out.iter().map(|&c| Face::ALL[c as usize].letter()).collect()
+}
+
+/// Color of every facelet as a face index (0 = U color, ...) relative to the
+/// current centers, after checking that the string describes a legal cube.
+pub fn facelet_colors(facelets: &str) -> Result<[u8; 54], CubeError> {
+    Ok(to_facelet_colors(&from_facelets(facelets)?))
+}
+
+/// Color of every facelet of a state, as a face index.
+pub fn to_facelet_colors(s: &CubieState) -> [u8; 54] {
+    let letters: Vec<char> = to_facelets(s).chars().collect();
+    std::array::from_fn(|i| Face::from_letter(letters[i]).expect("valid letter").index() as u8)
 }
 
 pub fn from_facelets(facelets: &str) -> Result<CubieState, CubeError> {

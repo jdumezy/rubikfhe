@@ -5,7 +5,7 @@
     "dev": "node scripts/dev.mjs",
     "dev:web": "npm --prefix web run dev",
     "build": "npm --prefix web run build",
-    "test": "npm --prefix web test && cargo test --manifest-path fhe/Cargo.toml",
-    "check": "npm --prefix web run check && cargo clippy --manifest-path fhe/Cargo.toml --all-targets"
+    "test": "npm --prefix web test && cd fhe && cargo test --release",
+    "check": "npm --prefix web run check && cd fhe && cargo clippy --all-targets"
   }
 }

@@ -1,0 +1,33 @@
+[package]
+name = "rubikfhe-ckks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rubikfhe-circuit.workspace = true
+poulpy-hal.workspace = true
+poulpy-core.workspace = true
+poulpy-ckks.workspace = true
+rayon = "1"
+
+# One backend per target, the fastest the build's target features allow.
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+poulpy-cpu-arm = { workspace = true, features = ["enable-ckks", "enable-rayon"] }
+
+[target.'cfg(all(target_arch = "x86_64", target_feature = "avx512ifma", target_feature = "avx512vl"))'.dependencies]
+poulpy-cpu-avx512 = { workspace = true, features = ["enable-ckks", "enable-ifma", "enable-rayon"] }
+
+[target.'cfg(all(target_arch = "x86_64", target_feature = "avx512f", not(all(target_feature = "avx512ifma", target_feature = "avx512vl"))))'.dependencies]
+poulpy-cpu-avx512 = { workspace = true, features = ["enable-ckks", "enable-rayon"] }
+
+[target.'cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma", not(target_feature = "avx512f")))'.dependencies]
+poulpy-cpu-avx = { workspace = true, features = ["enable-ckks", "enable-rayon"] }
+
+[target.'cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma"))))'.dependencies]
+poulpy-cpu-portable = { workspace = true, features = ["enable-ckks"] }
+
+[dev-dependencies]
+rubikfhe-cube.workspace = true
+rubikfhe-solver.workspace = true

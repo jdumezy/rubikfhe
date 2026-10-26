@@ -1,0 +1,3 @@
+# Let the build pick the fastest poulpy backend this CPU supports (see ckks/src/backend.rs).
+[build]
+rustflags = ["-C", "target-cpu=native"]

@@ -21,6 +21,8 @@ const view = new CubeView($("cube"));
 const status = $("status");
 const solutionLine = $("solution");
 const solveButton = $<HTMLButtonElement>("solve");
+const progress = $("progress");
+const progressBar = $("progress-bar");
 
 let scramble: Move[] = [];
 let userMoves: Move[] = [];
@@ -33,8 +35,15 @@ let solvePhase: SolvePhase = "idle";
 let solution: { moves: Move[]; played: number } | null = null;
 let solveError = "";
 let lastStats: fhe.SolveStats | null = null;
+let requestStart = 0;
+let requestTimer: number | undefined;
+let lastProgress: fhe.Progress | null = null;
+let progressPending = false;
 /** Bumped whenever the cube changes under a pending solve, to drop stale replies. */
 let solveToken = 0;
+
+/** Plays long decrypted solutions faster, so playback stays around 15 s. */
+const solverQuarterMs = (moves: number) => Math.min(280, Math.max(50, 15000 / Math.max(moves, 1)));
 
 const idle = () =>
   view.busy ? new Promise<void>((r) => view.addEventListener("idle", () => r(), { once: true })) : Promise.resolve();
@@ -43,6 +52,54 @@ function setSolvePhase(phase: SolvePhase) {
   solvePhase = phase;
   view.setTurnsLocked(phase !== "idle");
   solveButton.disabled = phase !== "idle";
+  clearInterval(requestTimer);
+  lastProgress = null;
+  progress.hidden = phase !== "requesting";
+  setProgress(0);
+  if (phase === "requesting") {
+    requestStart = performance.now();
+    requestTimer = window.setInterval(pollProgress, 250);
+  }
+}
+
+function setProgress(fraction: number) {
+  const percent = Math.round(Math.min(1, Math.max(0, fraction)) * 100);
+  progressBar.style.width = `${percent}%`;
+  progress.setAttribute("aria-valuenow", String(percent));
+}
+
+/** Follows the encrypted solve: client steps around the server's circuit stages. */
+async function pollProgress() {
+  refreshStatusLine(isSolved(view.getState()));
+  if (progressPending || view.busy) return;
+  progressPending = true;
+  try {
+    const p = await fhe.fetchProgress();
+    if (solvePhase !== "requesting") return;
+    lastProgress = p;
+    const evaluated = p.server?.fraction ?? (p.step === "decrypting" ? 1 : 0);
+    setProgress(p.step === "idle" ? 0 : 0.02 + 0.96 * evaluated + (p.step === "decrypting" ? 0.02 : 0));
+  } catch {
+  } finally {
+    progressPending = false;
+  }
+}
+
+const STEP_LABELS = {
+  decoding: "decoding stickers",
+  stage: "",
+  bootstrapping: "bootstrapping",
+  cleaning: "cleaning noise",
+  output: "packing moves",
+} as const;
+
+function progressLabel(): string {
+  const p = lastProgress;
+  if (!p || p.step === "idle") return "encrypting…";
+  if (p.step !== "evaluating" || !p.server) return `${p.step}…`;
+  const { stage, stages, step } = p.server;
+  const where = `stage ${Math.min(stage + 1, stages)}/${stages}`;
+  return STEP_LABELS[step] ? `${where}, ${STEP_LABELS[step]}` : where;
 }
 
 function cancelSolve() {
@@ -69,7 +126,7 @@ async function solve() {
     solution = { moves: result.moves, played: 0 };
     if (result.moves.length > 0) {
       setSolvePhase("playing");
-      view.enqueue(result.moves, "solver");
+      view.enqueue(result.moves, "solver", solverQuarterMs(result.moves.length));
     } else {
       setSolvePhase("idle");
     }
@@ -203,24 +260,53 @@ function formatMs(ms: number): string {
   return `${(ms / 1000).toFixed(2)} s`;
 }
 
+const SETUP_LABELS: Record<fhe.SetupPhase["phase"], string> = {
+  preparing: "preparing the circuit",
+  generating_keys: "generating keys",
+  uploading: "uploading keys",
+  ready: "keys on the server",
+  waiting_for_server: "waiting for the server",
+  failed: "setup failed",
+};
+
+let statusTimer: number | undefined;
+
 async function refreshClientStatus() {
   let s: fhe.Status | null = null;
   try {
     s = await fhe.fetchStatus();
   } catch {}
+  clearTimeout(statusTimer);
   if (!s) {
-    for (const name of ["fheScheme", "fheServer", "fheSolver", "fheKey"]) stat(name).textContent = "–";
+    for (const name of ["fheScheme", "fheBackend", "fheServer", "fheCircuit", "fheKey", "fheKeyTimes"]) stat(name).textContent = "–";
     stat("fheClient").textContent = "not running";
     return;
   }
   const { client, server } = s;
-  stat("fheScheme").textContent = client.scheme;
-  stat("fheClient").textContent = `running, v${client.version}`;
-  stat("fheServer").textContent = `${server.reachable ? "reachable" : "unreachable"} at ${server.addr}`;
-  stat("fheSolver").textContent = server.solver
-    ? `${server.solver}, ${server.phase_slots.join("+")} slots`
+  const setup = client.setup;
+  stat("fheScheme").textContent = client.params ? `${client.scheme}, ${client.params}` : client.scheme;
+  stat("fheBackend").textContent = client.backend;
+  let clientText = `v${client.version}`;
+  if (setup) {
+    clientText += `, ${SETUP_LABELS[setup.phase]}`;
+    if (setup.phase === "uploading") clientText += ` (${formatBytes(setup.sent_bytes)})`;
+  }
+  stat("fheClient").textContent = clientText;
+  stat("fheServer").textContent = server.reachable
+    ? `${server.addr}, ${server.info?.key_id ? "keys installed" : "no keys"}`
+    : `unreachable at ${server.addr}`;
+  stat("fheCircuit").textContent = client.stages
+    ? `${client.stages} stages, ${client.output_tokens} token slots`
     : "–";
-  stat("fheKey").textContent = `${formatBytes(client.eval_key_bytes)} (keygen ${formatMs(client.keygen_ms)})`;
+  stat("fheKey").textContent = setup?.phase === "ready" ? formatBytes(setup.key_bytes) : "–";
+  stat("fheKeyTimes").textContent =
+    setup?.phase === "ready" && client.keygen_ms
+      ? `${formatMs(client.keygen_ms)} / ${formatMs(setup.server_prepare_ms)}`
+      : "–";
+  // Follow the key setup while it runs.
+  if (panelOpen && setup && setup.phase !== "ready" && setup.phase !== "failed") {
+    statusTimer = window.setTimeout(refreshClientStatus, 1000);
+  }
 }
 
 function refreshRenderStats() {
@@ -234,7 +320,9 @@ function refreshRenderStats() {
 
 function refreshStatusLine(done: boolean) {
   if (solvePhase === "requesting")
-    status.textContent = view.busy ? "finishing moves…" : "encrypting, solving, decrypting…";
+    status.textContent = view.busy
+      ? "finishing moves…"
+      : `${progressLabel()} ${((performance.now() - requestStart) / 1000).toFixed(1)} s`;
   else if (solvePhase === "playing") status.textContent = `solution: ${solution!.moves.length} moves`;
   else if (solveError) status.textContent = `error: ${solveError}`;
   else if (solution && done)
@@ -267,14 +355,16 @@ function refreshSolutionLine() {
 function refreshLastSolve() {
   const s = lastStats;
   if (!s) return;
-  stat("fheCiphertexts").textContent = `${formatBytes(s.state_bytes)} / ${formatBytes(s.solution_bytes)}`;
-  stat("fheTraffic").textContent = `${formatBytes(s.upload_bytes)} / ${formatBytes(s.download_bytes)}`;
-  stat("fheEncrypt").textContent = formatMs(s.encrypt_ms);
+  const ckks = s.input_bytes !== undefined;
+  stat("fheCiphertexts").textContent = ckks
+    ? `${formatBytes(s.input_bytes!)} / ${formatBytes(s.output_bytes!)}`
+    : `${formatBytes(s.upload_bytes)} / ${formatBytes(s.download_bytes)} (plaintext)`;
+  stat("fheEncrypt").textContent = ckks ? formatMs(s.encrypt_ms!) : "–";
   stat("fheSolve").textContent = formatMs(s.solve_ms);
-  stat("fheDecrypt").textContent = formatMs(s.decrypt_ms);
+  stat("fheRefresh").textContent = ckks ? `${s.refreshes} / ${s.cleanings}` : "–";
+  stat("fheDecrypt").textContent = ckks ? formatMs(s.decrypt_ms!) : "–";
   stat("fheTotal").textContent = `${formatMs(s.network_ms)} / ${formatMs(s.total_ms)}`;
-  stat("fheMoves").textContent = `${s.raw_moves} / ${s.moves} (${s.slots} slots)`;
-  stat("fhePhases").textContent = s.phase_moves.map((n, i) => `${n}/${s.phase_slots[i]}`).join(" ");
+  stat("fheMoves").textContent = `${s.raw_moves} / ${s.moves} (${s.output_slots} slots)`;
 }
 
 function refresh() {

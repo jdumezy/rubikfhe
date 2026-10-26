@@ -7,7 +7,10 @@ mod moves;
 use std::fmt;
 
 pub use cubie::{CubieState, FACE_MOVE_TABLES, STATE_BYTES, parity};
-pub use facelets::{from_facelets, to_facelets};
+pub use facelets::{
+    CORNER_COLORS, CORNER_FACELETS, EDGE_COLORS, EDGE_FACELETS, facelet_colors, from_facelets, to_facelet_colors,
+    to_facelets,
+};
 pub use moves::{Face, Move, format_moves, parse_moves, simplify};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

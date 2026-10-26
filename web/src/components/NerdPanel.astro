@@ -60,19 +60,20 @@ const block = "mt-1 break-all rounded bg-zinc-100 px-2 py-1.5 leading-relaxed da
     <section class={section}>
       <h2 class={heading}>fhe</h2>
       <div class={row}><span class={label}>scheme</span><span data-stat="fheScheme">–</span></div>
+      <div class={row}><span class={label}>backend</span><span data-stat="fheBackend">–</span></div>
       <div class={row}><span class={label}>client</span><span data-stat="fheClient">–</span></div>
       <div class={row}><span class={label}>server</span><span data-stat="fheServer">–</span></div>
-      <div class={row}><span class={label}>solver</span><span data-stat="fheSolver">–</span></div>
-      <div class={row}><span class={label}>evaluation key</span><span data-stat="fheKey">–</span></div>
+      <div class={row}><span class={label}>circuit</span><span data-stat="fheCircuit">–</span></div>
+      <div class={row}><span class={label}>evaluation keys</span><span data-stat="fheKey">–</span></div>
+      <div class={row}><span class={label}>keygen / server prepare</span><span data-stat="fheKeyTimes">–</span></div>
       <div class={`${label} mt-2`}>last solve</div>
-      <div class={row}><span class={label}>state / solution ciphertexts</span><span data-stat="fheCiphertexts">–</span></div>
-      <div class={row}><span class={label}>sent / received</span><span data-stat="fheTraffic">–</span></div>
+      <div class={row}><span class={label}>input / output ciphertexts</span><span data-stat="fheCiphertexts">–</span></div>
       <div class={row}><span class={label}>encrypt</span><span data-stat="fheEncrypt">–</span></div>
-      <div class={row}><span class={label}>solve (server)</span><span data-stat="fheSolve">–</span></div>
+      <div class={row}><span class={label}>evaluate (server)</span><span data-stat="fheSolve">–</span></div>
+      <div class={row}><span class={label}>bootstraps / cleanings</span><span data-stat="fheRefresh">–</span></div>
       <div class={row}><span class={label}>decrypt</span><span data-stat="fheDecrypt">–</span></div>
       <div class={row}><span class={label}>transport / total</span><span data-stat="fheTotal">–</span></div>
       <div class={row}><span class={label}>moves raw / simplified</span><span data-stat="fheMoves">–</span></div>
-      <div class={row}><span class={label}>moves per phase</span><span data-stat="fhePhases">–</span></div>
     </section>
   </div>
 </aside>

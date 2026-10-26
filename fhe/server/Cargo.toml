@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-rubikfhe-cube.workspace = true
+anyhow.workspace = true
+rubikfhe-ckks.workspace = true
+rubikfhe-circuit.workspace = true
 rubikfhe-solver.workspace = true
 rubikfhe-protocol.workspace = true
-tokio.workspace = true
