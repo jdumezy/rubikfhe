@@ -1,0 +1,70 @@
+---
+const section = "border-t border-zinc-200 px-4 py-3 dark:border-zinc-800";
+const heading = "mb-2 text-[0.65rem] uppercase tracking-widest text-zinc-400 dark:text-zinc-500";
+const row = "flex justify-between gap-4 py-0.5";
+const label = "text-zinc-500";
+const block = "mt-1 break-all rounded bg-zinc-100 px-2 py-1.5 leading-relaxed dark:bg-zinc-950";
+---
+
+<aside
+  id="nerd-panel"
+  class="fixed inset-y-0 right-0 z-20 flex w-full translate-x-full flex-col border-l border-zinc-200 bg-white/95 font-mono text-xs shadow-xl backdrop-blur transition-transform duration-200 data-open:translate-x-0 sm:w-96 dark:border-zinc-800 dark:bg-zinc-900/95"
+  aria-label="Stats for nerds"
+  inert
+>
+  <div class="flex items-center justify-between px-4 py-3">
+    <span class="font-semibold">stats for nerds</span>
+    <button
+      id="nerd-close"
+      type="button"
+      class="rounded px-2 py-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+      aria-label="Close"
+    >
+      ✕
+    </button>
+  </div>
+
+  <div class="flex-1 overflow-y-auto pb-6">
+    <section class={section}>
+      <h2 class={heading}>render</h2>
+      <div class={row}><span class={label}>fps</span><span data-stat="fps">–</span></div>
+      <div class={row}><span class={label}>draw calls</span><span data-stat="drawCalls">–</span></div>
+      <div class={row}><span class={label}>triangles</span><span data-stat="triangles">–</span></div>
+      <div class={row}><span class={label}>pixel ratio</span><span data-stat="pixelRatio">–</span></div>
+      <div class={row}><span class={label}>queued moves</span><span data-stat="queued">–</span></div>
+    </section>
+
+    <section class={section}>
+      <h2 class={heading}>state</h2>
+      <div class={row}><span class={label}>solved</span><span data-stat="solved">–</span></div>
+      <div class={row}><span class={label}>moves since scramble</span><span data-stat="moveCount">–</span></div>
+      <div id="nerd-net" class="my-3 grid w-fit grid-cols-12 gap-px" aria-hidden="true"></div>
+      <div class={label}>facelets (URFDLB)</div>
+      <div class={block} data-stat="facelets">–</div>
+      <div class={`${label} mt-2`}>corners cp / co</div>
+      <div class={block}><span data-stat="cp">–</span><br /><span data-stat="co">–</span></div>
+      <div class={`${label} mt-2`}>edges ep / eo</div>
+      <div class={block}><span data-stat="ep">–</span><br /><span data-stat="eo">–</span></div>
+      <div class={`${label} mt-2`}>centers (URFDLB)</div>
+      <div class={block} data-stat="ctr">–</div>
+    </section>
+
+    <section class={section}>
+      <h2 class={heading}>history</h2>
+      <div class={label}>scramble</div>
+      <div class={block} data-stat="scramble">–</div>
+      <div class={`${label} mt-2`}>moves</div>
+      <div class={block} data-stat="history">–</div>
+    </section>
+
+    <section class={section}>
+      <h2 class={heading}>fhe</h2>
+      <div class={row}><span class={label}>library</span><span>poulpy</span></div>
+      <div class={row}><span class={label}>client</span><span class="text-zinc-400">not connected</span></div>
+      <div class={row}><span class={label}>server</span><span class="text-zinc-400">not connected</span></div>
+      <div class={row}><span class={label}>keys</span><span class="text-zinc-400">–</span></div>
+      <div class={row}><span class={label}>ciphertexts</span><span class="text-zinc-400">–</span></div>
+      <div class={row}><span class={label}>encrypt / solve / decrypt</span><span class="text-zinc-400">–</span></div>
+    </section>
+  </div>
+</aside>
