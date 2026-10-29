@@ -28,6 +28,20 @@ poulpy-cpu-avx = { workspace = true, features = ["enable-ckks", "enable-rayon"] 
 [target.'cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma"))))'.dependencies]
 poulpy-cpu-portable = { workspace = true, features = ["enable-ckks"] }
 
+# A GPU for the server's evaluation, through CubeCL: CUDA on NVIDIA cards, HIP on
+# AMD cards, wgpu on the others (Metal on macOS, Vulkan elsewhere). The client
+# and the key and ciphertext formats stay on the CPU backend.
+[features]
+cuda = ["dep:poulpy-gpu-portable", "poulpy-gpu-portable/enable-cuda"]
+hip = ["dep:poulpy-gpu-portable", "poulpy-gpu-portable/enable-hip"]
+wgpu = ["dep:poulpy-gpu-portable"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+poulpy-gpu-portable = { workspace = true, optional = true, features = ["enable-ckks", "enable-metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+poulpy-gpu-portable = { workspace = true, optional = true, features = ["enable-ckks", "enable-vulkan"] }
+
 [dev-dependencies]
 rubikfhe-cube.workspace = true
 rubikfhe-solver.workspace = true

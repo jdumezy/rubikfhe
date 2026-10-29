@@ -3,11 +3,11 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use poulpy_ckks::presets::bootstrapping::{BootstrappingPreset, n16_d35_k733_p20_s2c};
 use poulpy_core::layouts::{GLWEAutomorphismKeyLayout, GLWELayout, GLWETensorKeyLayout, Rank};
 
-use crate::backend::Be;
+use crate::backend::{Be, Dev};
 use crate::functional::FunctionalPreset;
 
 /// Failure probability `2^-128` per bootstrap when adapting the radix to the backend.
@@ -39,15 +39,21 @@ pub struct Params {
     pub bootstrap: Option<Arc<FunctionalPreset>>,
 }
 
-/// The preset at the largest radix the backend affords for a `2^-128`
+/// The preset at the largest radix both backends afford for a `2^-128`
 /// bootstrap failure probability, as poulpy's `preset_for_backend` derives it:
 /// above the nominal radix the keys are re-derived, below it the high-modulus
-/// keys take the widest digits that fit the modulus bounds. (EvalMod runs on
-/// the standard ring, so the conjugate-invariant backend is `Be` itself.)
+/// keys take the widest digits that fit the modulus bounds. The client's CPU
+/// backend and the server's device must agree on the parameters. (EvalMod runs
+/// on the standard ring, so no conjugate-invariant backend is involved.)
 fn for_backend(preset: BootstrappingPreset) -> Result<BootstrappingPreset> {
-    let max = preset.max_backend_base2k::<Be, Be>(BOOTSTRAP_FAILURE_BITS);
+    let max = preset
+        .max_backend_base2k::<Be, Be>(BOOTSTRAP_FAILURE_BITS)
+        .min(preset.max_backend_base2k::<Dev, Dev>(BOOTSTRAP_FAILURE_BITS));
     if max > preset.base2k() {
-        return preset.with_backend_base2k::<Be, Be>(BOOTSTRAP_FAILURE_BITS);
+        return (1..=max)
+            .rev()
+            .find_map(|base2k| preset.with_base2k(base2k).ok())
+            .with_context(|| format!("no radix up to {max} fits the modulus bounds of {}", preset.name()));
     }
     if max == preset.base2k() {
         return Ok(preset);

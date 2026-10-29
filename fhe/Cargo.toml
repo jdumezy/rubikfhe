@@ -14,13 +14,14 @@ rubikfhe-circuit = { path = "circuit" }
 rubikfhe-ckks = { path = "ckks" }
 anyhow = "1"
 # poulpy main, pinned until v0.10.0 is released.
-poulpy-hal = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
-poulpy-core = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
-poulpy-ckks = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
-poulpy-cpu-arm = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
-poulpy-cpu-avx = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
-poulpy-cpu-avx512 = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
-poulpy-cpu-portable = { git = "https://github.com/poulpy-fhe/poulpy", rev = "a6a17b8088be79f13586f7b55f764782b49687c2" }
+poulpy-hal = { git = "https://github.com/poulpy-fhe/poulpy", rev = "6018905c5be25070a0e5b2b31759cb96468b5908" }
+poulpy-core = { git = "https://github.com/poulpy-fhe/poulpy", rev = "6018905c5be25070a0e5b2b31759cb96468b5908" }
+poulpy-ckks = { git = "https://github.com/poulpy-fhe/poulpy", rev = "6018905c5be25070a0e5b2b31759cb96468b5908" }
+poulpy-cpu-arm = { git = "https://github.com/poulpy-fhe/poulpy", rev = "6018905c5be25070a0e5b2b31759cb96468b5908" }
+poulpy-cpu-avx = { git = "https://github.com/poulpy-fhe/poulpy", rev = "6018905c5be25070a0e5b2b31759cb96468b5908" }
+poulpy-cpu-avx512 = { git = "https://github.com/poulpy-fhe/poulpy", rev = "6018905c5be25070a0e5b2b31759cb96468b5908" }
+poulpy-cpu-portable = { git = "https://github.com/poulpy-fhe/poulpy", rev = "6018905c5be25070a0e5b2b31759cb96468b5908" }
+poulpy-gpu-portable = { git = "https://github.com/poulpy-fhe/poulpy", rev = "6018905c5be25070a0e5b2b31759cb96468b5908" }
 rubikfhe-protocol = { path = "protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

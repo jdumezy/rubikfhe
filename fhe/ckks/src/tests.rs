@@ -36,7 +36,7 @@ fn setup(params: Params, plan: &PackedPlan) -> (CkksEngine, crate::SecretKey) {
     crate::wire::write_eval_keys(&mut bytes, &keys).unwrap();
     drop(keys);
     let server_ring = Ring::new(params).unwrap();
-    let mut engine = CkksEngine::new(server_ring);
+    let mut engine = CkksEngine::new(server_ring).unwrap();
     let keys = engine.prepare_keys_from(&mut bytes.as_slice()).unwrap();
     engine.set_keys(Some(keys));
     (engine, sk)
@@ -56,10 +56,10 @@ fn operations_match_the_simulator() {
 
     let a: Vec<f64> = (0..slots).map(|i| ((i * 7) % 5) as f64 / 4.0).collect();
     let b: Vec<f64> = (0..slots).map(|i| ((i * 3) % 2) as f64).collect();
-    let ca = engine.ring.encrypt(&sk, &a, [3; 32]).unwrap();
-    let cb = engine.ring.encrypt(&sk, &b, [4; 32]).unwrap();
-    let check = |name: &str, ct: &crate::engine::Ciphertext, want: Vec<f64>| {
-        let got = engine.ring.decrypt(&sk, ct).unwrap();
+    let ca = engine.upload(&engine.ring.encrypt(&sk, &a, [3; 32]).unwrap());
+    let cb = engine.upload(&engine.ring.encrypt(&sk, &b, [4; 32]).unwrap());
+    let check = |name: &str, ct: &crate::engine::DeviceCiphertext, want: Vec<f64>| {
+        let got = engine.ring.decrypt(&sk, &engine.download(ct).unwrap()).unwrap();
         let err = max_err(&got, &want);
         assert!(err < 1e-3, "{name}: max error {err:e}");
     };
@@ -87,12 +87,16 @@ fn ckks_tokens(
 ) -> Vec<i64> {
     let (u, v) = plan.pack_input(&to_facelet_colors(s));
     let enc = |x: &Vec<Vec<f64>>, seed: u8| -> Vec<_> {
-        x.iter().enumerate().map(|(i, v)| engine.ring.encrypt(sk, v, [seed + i as u8; 32]).unwrap()).collect()
+        x.iter()
+            .enumerate()
+            .map(|(i, v)| engine.upload(&engine.ring.encrypt(sk, v, [seed + i as u8; 32]).unwrap()))
+            .collect()
     };
     let through_wire = |cts: Vec<_>| -> Vec<_> {
         cts.iter()
             .map(|c| {
-                crate::wire::ciphertext_from_bytes(&engine.ring, &crate::wire::ciphertext_to_bytes(c).unwrap()).unwrap()
+                let bytes = crate::wire::ciphertext_to_bytes(&engine.download(c).unwrap()).unwrap();
+                engine.upload(&crate::wire::ciphertext_from_bytes(&engine.ring, &bytes).unwrap())
             })
             .collect()
     };
@@ -100,7 +104,15 @@ fn ckks_tokens(
     let t = Instant::now();
     let (out, report) = evaluate(engine, prepared, &u, &v).unwrap();
     eprintln!("evaluated in {:.2?} ({} refreshes)", t.elapsed(), report.refreshes);
-    let dec = |cts: &Vec<_>| -> Vec<Vec<f64>> { cts.iter().map(|c| engine.ring.decrypt(sk, c).unwrap()).collect() };
+    // The outputs go back through the byte format too, as the server sends them.
+    let dec = |cts: &Vec<_>| -> Vec<Vec<f64>> {
+        cts.iter()
+            .map(|c| {
+                let bytes = crate::wire::ciphertext_to_bytes(&engine.download(c).unwrap()).unwrap();
+                engine.ring.decrypt(sk, &crate::wire::ciphertext_from_bytes(&engine.ring, &bytes).unwrap()).unwrap()
+            })
+            .collect()
+    };
     plan.unpack_tokens(&dec(&out.cols), &dec(&out.rows))
 }
 
@@ -165,7 +177,10 @@ fn drift(params: Params) {
     .unwrap();
 
     let enc = |x: &Vec<Vec<f64>>, seed: u8| -> Vec<_> {
-        x.iter().enumerate().map(|(i, v)| engine.ring.encrypt(&sk, v, [seed + i as u8; 32]).unwrap()).collect()
+        x.iter()
+            .enumerate()
+            .map(|(i, v)| engine.upload(&engine.ring.encrypt(&sk, v, [seed + i as u8; 32]).unwrap()))
+            .collect()
     };
     let (cu, cv) = (enc(&u, 10), enc(&v, 100));
     let (outputs, report) = evaluate_inspected(&engine, &prepared, &cu, &cv, |e| {
@@ -175,11 +190,11 @@ fn drift(params: Params) {
             }
             return;
         };
-        let got_sel = engine.ring.decrypt(&sk, sel).unwrap();
+        let got_sel = engine.ring.decrypt(&sk, &engine.download(sel).unwrap()).unwrap();
         let (want_sel, want_state) = &sim_states[i];
         let sum_got: f64 = got_sel.iter().sum::<f64>();
         let sum_want: f64 = want_sel.iter().sum::<f64>();
-        let state_err = state.iter().zip(want_state).map(|(c, w)| max_err(&engine.ring.decrypt(&sk, c).unwrap(), w)).fold(0.0, f64::max);
+        let state_err = state.iter().zip(want_state).map(|(c, w)| max_err(&engine.ring.decrypt(&sk, &engine.download(c).unwrap()).unwrap(), w)).fold(0.0, f64::max);
         eprintln!(
             "stage {i:2}: selector err {:.2e}, sum {sum_got:.4} (want {sum_want}), state err {state_err:.2e}, budget {}",
             max_err(&got_sel, want_sel), engine.log_budget(sel)
@@ -187,7 +202,9 @@ fn drift(params: Params) {
     })
     .unwrap();
     // How far the token slots are from their integers.
-    let dec = |cts: &[_]| -> Vec<Vec<f64>> { cts.iter().map(|c| engine.ring.decrypt(&sk, c).unwrap()).collect() };
+    let dec = |cts: &[_]| -> Vec<Vec<f64>> {
+        cts.iter().map(|c| engine.ring.decrypt(&sk, &engine.download(c).unwrap()).unwrap()).collect()
+    };
     let (cols, rows) = (dec(&outputs.cols), dec(&outputs.rows));
     let token_err = plan
         .token_slots
@@ -205,19 +222,22 @@ fn drift(params: Params) {
     eprintln!("{report:?}; token error {token_err:.2e}");
 }
 
-/// Forwards to an engine and records the time spent in each kind of operation.
+/// Forwards to an engine and records the time spent in each kind of operation,
+/// waiting for the device after each so that queued work is charged to its call.
 struct Timed<'a, E> {
     inner: &'a E,
+    sync: &'a (dyn Fn() + Sync),
     times: std::sync::Mutex<std::collections::BTreeMap<&'static str, (u32, std::time::Duration)>>,
 }
 
 impl<'a, E: Engine> Timed<'a, E> {
-    fn new(inner: &'a E) -> Self {
-        Timed { inner, times: Default::default() }
+    fn new(inner: &'a E, sync: &'a (dyn Fn() + Sync)) -> Self {
+        Timed { inner, sync, times: Default::default() }
     }
     fn time<T>(&self, op: &'static str, f: impl FnOnce() -> T) -> T {
         let t = Instant::now();
         let out = f();
+        (self.sync)();
         let mut times = self.times.lock().unwrap();
         let entry = times.entry(op).or_default();
         entry.0 += 1;
@@ -244,6 +264,9 @@ impl<E: Engine> Engine for Timed<'_, E> {
     }
     fn mul_pt(&self, a: &E::Ct, b: &E::Pt) -> anyhow::Result<E::Ct> {
         self.time("mul_pt (masks, codes)", || self.inner.mul_pt(a, b))
+    }
+    fn copy(&self, a: &E::Ct) -> anyhow::Result<E::Ct> {
+        self.time("add/sub", || self.inner.copy(a))
     }
     fn add_assign(&self, a: &mut E::Ct, b: &E::Ct) -> anyhow::Result<()> {
         self.time("add/sub", || self.inner.add_assign(a, b))
@@ -320,13 +343,14 @@ fn profile_secure() {
     );
     drop(circuit_bytes);
 
-    let mut engine = CkksEngine::new(Ring::new(params).unwrap());
+    let mut engine = CkksEngine::new(Ring::new(params).unwrap()).unwrap();
     let before_keys = rss_gb();
     let keys = engine.prepare_keys_from(&mut bytes.as_slice()).unwrap();
     let after_keys = rss_gb();
     drop(bytes);
     engine.set_keys(Some(keys));
-    let timed = Timed::new(&engine);
+    let sync = || engine.synchronize();
+    let timed = Timed::new(&engine, &sync);
     let before_plan = rss_gb();
     let prepared = Prepared::new(&timed, &plan).unwrap();
     let after_plan = rss_gb();
@@ -338,8 +362,11 @@ fn profile_secure() {
 
     let s = scramble(7, 40);
     let (u, v) = plan.pack_input(&to_facelet_colors(&s));
-    let u: Vec<_> = u.iter().map(|x| engine.ring.encrypt(&sk, x, [3; 32]).unwrap()).collect();
-    let v: Vec<_> = v.iter().map(|x| engine.ring.encrypt(&sk, x, [4; 32]).unwrap()).collect();
+    let u: Vec<_> = u.iter().map(|x| engine.upload(&engine.ring.encrypt(&sk, x, [3; 32]).unwrap())).collect();
+    let v: Vec<_> = v.iter().map(|x| engine.upload(&engine.ring.encrypt(&sk, x, [4; 32]).unwrap())).collect();
+    // A first run compiles the device's kernels; the profile is of the next.
+    evaluate(&timed, &prepared, &u, &v).unwrap();
+    timed.times.lock().unwrap().clear();
     let t = Instant::now();
     let (out, report) = evaluate(&timed, &prepared, &u, &v).unwrap();
     let total = t.elapsed();
@@ -351,7 +378,9 @@ fn profile_secure() {
             100.0 * d.as_secs_f64() / total.as_secs_f64()
         );
     }
-    let dec = |cts: &Vec<_>| -> Vec<Vec<f64>> { cts.iter().map(|c| engine.ring.decrypt(&sk, c).unwrap()).collect() };
+    let dec = |cts: &Vec<_>| -> Vec<Vec<f64>> {
+        cts.iter().map(|c| engine.ring.decrypt(&sk, &engine.download(c).unwrap()).unwrap()).collect()
+    };
     assert_eq!(
         plan.unpack_tokens(&dec(&out.cols), &dec(&out.rows)),
         evaluate_reference(tables(), &one_hot(&to_facelet_colors(&s)))
@@ -366,7 +395,7 @@ fn server_memory_steps() {
     let r0 = rss_gb();
     let ring = Ring::new(params).unwrap();
     let r1 = rss_gb();
-    let engine = CkksEngine::new(ring);
+    let engine = CkksEngine::new(ring).unwrap();
     let r2 = rss_gb();
     let prepared = Prepared::new(&engine, &plan).unwrap();
     let r3 = rss_gb();
@@ -402,9 +431,8 @@ fn functional_preset_cleans_noisy_bits() {
     use poulpy_ckks::api::CKKSBootstrappingOps;
     use poulpy_ckks::layouts::BootstrappingContext;
     use poulpy_ckks::prelude::*;
-    use poulpy_core::layouts::{
-        GLWELayout, GLWESecretSampling, LWEInfos, ModuleCoreAlloc, Rank, prepared::GLWESecretPreparedFactory,
-    };
+    use poulpy_core::layouts::{GLWELayout, LWEInfos, ModuleCoreAlloc, Rank};
+    use poulpy_core::{GLWESecretPreparedFactory, GLWESecretSampling};
     use poulpy_hal::api::{ScratchOwnedAlloc, ScratchOwnedBorrow};
     use poulpy_hal::layouts::{Module, ScratchOwned};
     use poulpy_hal::source::Source;
@@ -525,9 +553,9 @@ fn secure_refresh_rounds_bits() {
     let bits: Vec<f64> = (0..m).map(|i| (i % 3 == 0) as u8 as f64).collect();
     let noisy: Vec<f64> =
         bits.iter().enumerate().map(|(i, b)| b + 0.01 * (((i * 37) % 11) as f64 / 5.0 - 1.0)).collect();
-    let ct = engine.ring.encrypt(&sk, &noisy, [9; 32]).unwrap();
+    let ct = engine.upload(&engine.ring.encrypt(&sk, &noisy, [9; 32]).unwrap());
     eprintln!("fresh: k {} log_delta {} budget {}", ct.k().as_usize(), ct.log_delta(), ct.log_budget());
-    let fresh = engine.ring.decrypt(&sk, &ct).unwrap();
+    let fresh = engine.ring.decrypt(&sk, &engine.download(&ct).unwrap()).unwrap();
     eprintln!("fresh error {:.2e}", max_err(&fresh, &bits));
     let t = Instant::now();
     let out = engine.refresh(&ct).unwrap();
@@ -538,8 +566,79 @@ fn secure_refresh_rounds_bits() {
         out.log_delta(),
         out.log_budget()
     );
-    let got = engine.ring.decrypt(&sk, &out).unwrap();
+    let got = engine.ring.decrypt(&sk, &engine.download(&out).unwrap()).unwrap();
     let err = max_err(&got, &bits);
     eprintln!("refreshed error {err:.2e}");
     assert!(err < 1e-3);
+}
+
+#[test]
+#[ignore = "probe: a cold and a warm run of the circuit on the device"]
+fn device_cold_and_warm() {
+    let params = Params::secure().unwrap();
+    let plan = PackedPlan::new(tables(), params.slots());
+    let (engine, sk) = setup(params, &plan);
+    let prepared = Prepared::new(&engine, &plan).unwrap();
+    let (u, v) = plan.pack_input(&to_facelet_colors(&scramble(7, 40)));
+    let enc = |x: &Vec<Vec<f64>>| -> Vec<_> {
+        x.iter().map(|v| engine.upload(&engine.ring.encrypt(&sk, v, [5; 32]).unwrap())).collect()
+    };
+    let (u, v) = (enc(&u), enc(&v));
+    for run in ["cold", "warm", "warm"] {
+        let t = Instant::now();
+        evaluate(&engine, &prepared, &u, &v).unwrap();
+        engine.synchronize();
+        eprintln!("{run} run {:.2?}", t.elapsed());
+    }
+}
+
+#[test]
+#[ignore = "probe: each operation of the circuit alone on the device, synchronized"]
+fn device_op_costs() {
+    use rubikfhe_circuit::packed::layout::LOG_SIDE;
+    let params = Params::secure().unwrap();
+    let plan = PackedPlan::new(tables(), params.slots());
+    let (engine, sk) = setup(params, &plan);
+    let x: Vec<f64> = (0..engine.slots()).map(|i| (i % 2) as f64).collect();
+    let a = engine.upload(&engine.ring.encrypt(&sk, &x, [3; 32]).unwrap());
+    let b = engine.upload(&engine.ring.encrypt(&sk, &x, [4; 32]).unwrap());
+    let reps = 5;
+    let time = |name: &str, f: &mut dyn FnMut()| {
+        f();
+        engine.synchronize();
+        let t = Instant::now();
+        for _ in 0..reps {
+            f();
+        }
+        engine.synchronize();
+        eprintln!("{name:<28} {:>9.2?}", t.elapsed() / reps);
+    };
+    let pt = engine.encode(&x).unwrap();
+    let lt = engine.encode_lt(&plan.stages[0].gather[0]).unwrap();
+    let t = engine.apply_lt(&a, &lt).unwrap();
+    time("mul fresh x fresh", &mut || drop(engine.mul(&a, &b).unwrap()));
+    time("mul gathered x fresh", &mut || drop(engine.mul(&t, &b).unwrap()));
+    time("mul_pt", &mut || drop(engine.mul_pt(&a, &pt).unwrap()));
+    time("apply_lt", &mut || drop(engine.apply_lt(&a, &lt).unwrap()));
+    time("inner_sum 5x32", &mut || drop(engine.inner_sum(&a, LOG_SIDE, LOG_SIDE).unwrap()));
+    time("replicate 5x32", &mut || drop(engine.replicate(&a, LOG_SIDE, LOG_SIDE).unwrap()));
+    time("refresh", &mut || drop(engine.refresh(&a).unwrap()));
+    let prepared = Prepared::new(&engine, &plan).unwrap();
+    eprintln!("-- with the plan encoded");
+    time("mul gathered x fresh", &mut || drop(engine.mul(&t, &b).unwrap()));
+    time("apply_lt", &mut || drop(engine.apply_lt(&a, &lt).unwrap()));
+    time("refresh", &mut || drop(engine.refresh(&a).unwrap()));
+    let (u, v) = plan.pack_input(&to_facelet_colors(&scramble(7, 40)));
+    let enc = |x: &Vec<Vec<f64>>| -> Vec<_> {
+        x.iter().map(|v| engine.upload(&engine.ring.encrypt(&sk, v, [5; 32]).unwrap())).collect()
+    };
+    let (u, v) = (enc(&u), enc(&v));
+    let t0 = Instant::now();
+    evaluate(&engine, &prepared, &u, &v).unwrap();
+    engine.synchronize();
+    eprintln!("whole circuit {:.2?}", t0.elapsed());
+    eprintln!("-- after the circuit");
+    time("mul gathered x fresh", &mut || drop(engine.mul(&t, &b).unwrap()));
+    time("apply_lt", &mut || drop(engine.apply_lt(&a, &lt).unwrap()));
+    time("refresh", &mut || drop(engine.refresh(&a).unwrap()));
 }

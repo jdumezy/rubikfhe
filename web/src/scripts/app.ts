@@ -278,14 +278,17 @@ async function refreshClientStatus() {
   } catch {}
   clearTimeout(statusTimer);
   if (!s) {
-    for (const name of ["fheScheme", "fheBackend", "fheServer", "fheCircuit", "fheKey", "fheKeyTimes"]) stat(name).textContent = "–";
+    for (const name of ["fheScheme", "fheBackend", "fheClientBackend", "fheServer", "fheCircuit", "fheKey", "fheKeyTimes"])
+      stat(name).textContent = "–";
     stat("fheClient").textContent = "not running";
     return;
   }
   const { client, server } = s;
   const setup = client.setup;
   stat("fheScheme").textContent = client.params ? `${client.scheme}, ${client.params}` : client.scheme;
-  stat("fheBackend").textContent = client.backend;
+  // The server evaluates, possibly on a GPU; the client generates keys and encrypts on the CPU.
+  stat("fheBackend").textContent = server.info?.backend ?? "–";
+  stat("fheClientBackend").textContent = client.backend;
   let clientText = `v${client.version}`;
   if (setup) {
     clientText += `, ${SETUP_LABELS[setup.phase]}`;

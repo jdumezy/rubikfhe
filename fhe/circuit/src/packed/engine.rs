@@ -12,7 +12,7 @@ use anyhow::Result;
 pub type Diagonals = BTreeMap<usize, Vec<f64>>;
 
 pub trait Engine: Sync {
-    type Ct: Clone + Send + Sync;
+    type Ct: Send + Sync;
     type Pt: Send + Sync;
     type Lt: Send + Sync;
 
@@ -22,6 +22,8 @@ pub trait Engine: Sync {
     fn encode(&self, values: &[f64]) -> Result<Self::Pt>;
     fn encode_lt(&self, diagonals: &Diagonals) -> Result<Self::Lt>;
 
+    /// A copy of `a` (device buffers are not `Clone`).
+    fn copy(&self, a: &Self::Ct) -> Result<Self::Ct>;
     fn mul(&self, a: &Self::Ct, b: &Self::Ct) -> Result<Self::Ct>;
     fn mul_pt(&self, a: &Self::Ct, b: &Self::Pt) -> Result<Self::Ct>;
     fn add_assign(&self, a: &mut Self::Ct, b: &Self::Ct) -> Result<()>;
@@ -93,6 +95,10 @@ impl Engine for SlotSim {
     fn sub_assign(&self, a: &mut Vec<f64>, b: &Vec<f64>) -> Result<()> {
         a.iter_mut().zip(b).for_each(|(x, y)| *x -= y);
         Ok(())
+    }
+
+    fn copy(&self, a: &Vec<f64>) -> Result<Vec<f64>> {
+        Ok(a.clone())
     }
 
     fn apply_lt(&self, a: &Vec<f64>, lt: &Diagonals) -> Result<Vec<f64>> {

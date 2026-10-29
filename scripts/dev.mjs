@@ -1,15 +1,43 @@
 // Builds the Rust binaries, then runs the server, the client and the web dev
 // server together. Ctrl-C stops all three.
 import { spawn, spawnSync } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
+// The server runs on the GPU whenever there is one: CUDA on NVIDIA cards (with
+// their driver), HIP on AMD cards (with ROCm), wgpu on the others (Metal on
+// macOS, Vulkan elsewhere). The CPU only without a GPU. RUBIKFHE_GPU (cuda,
+// hip, wgpu or none) overrides the choice.
+function gpuFeature() {
+  const forced = process.env.RUBIKFHE_GPU;
+  if (forced) return forced === "none" ? null : forced;
+  const runs = (cmd, args) => spawnSync(cmd, args, { stdio: "ignore" }).status === 0;
+  if (runs("nvidia-smi", ["-L"])) return "cuda";
+  if (runs("rocminfo", [])) return "hip";
+  if (process.platform === "darwin" || process.platform === "win32") return "wgpu";
+  // Linux lists its display adapters, whatever their drivers.
+  const hasGpu = () => {
+    try {
+      return readdirSync("/sys/class/drm").some((d) => /^card\d+$/.test(d));
+    } catch {
+      return false;
+    }
+  };
+  if (hasGpu() || runs("vulkaninfo", ["--summary"])) return "wgpu";
+  return null;
+}
+
+const gpu = gpuFeature();
+console.log(gpu ? `server on the GPU (${gpu})` : "server on the CPU");
+
 // Cargo runs inside fhe/ so its pinned toolchain and build flags apply.
-const build = spawnSync("cargo", ["build", "--release"], {
-  cwd: `${root}/fhe`,
-  stdio: "inherit",
-});
+const build = spawnSync(
+  "cargo",
+  ["build", "--release", ...(gpu ? ["--features", `rubikfhe-ckks/${gpu}`] : [])],
+  { cwd: `${root}/fhe`, stdio: "inherit" },
+);
 if (build.status !== 0) process.exit(build.status ?? 1);
 
 const processes = [

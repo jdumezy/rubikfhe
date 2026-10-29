@@ -39,3 +39,36 @@ mod chosen {
 }
 
 pub use chosen::{Be, NAME};
+
+/// The backend the server evaluates on: the GPU runtime the build enables, at
+/// most one (CUDA first, then HIP, then wgpu), or else the CPU backend.
+#[cfg(feature = "cuda")]
+mod device {
+    pub type Dev = poulpy_gpu_portable::NTT4x30Cuda;
+    pub const DEVICE_NAME: &str = "NTT4x30Cuda";
+    pub const ON_GPU: bool = true;
+}
+
+#[cfg(all(feature = "hip", not(feature = "cuda")))]
+mod device {
+    pub type Dev = poulpy_gpu_portable::NTT4x30Hip;
+    pub const DEVICE_NAME: &str = "NTT4x30Hip";
+    pub const ON_GPU: bool = true;
+}
+
+#[cfg(all(feature = "wgpu", not(any(feature = "cuda", feature = "hip"))))]
+mod device {
+    pub type Dev = poulpy_gpu_portable::NTT4x30Wgpu;
+    pub const DEVICE_NAME: &str =
+        if cfg!(target_os = "macos") { "NTT4x30Wgpu (Metal)" } else { "NTT4x30Wgpu (Vulkan)" };
+    pub const ON_GPU: bool = true;
+}
+
+#[cfg(not(any(feature = "cuda", feature = "hip", feature = "wgpu")))]
+mod device {
+    pub type Dev = super::Be;
+    pub const DEVICE_NAME: &str = super::NAME;
+    pub const ON_GPU: bool = false;
+}
+
+pub use device::{DEVICE_NAME, Dev, ON_GPU};

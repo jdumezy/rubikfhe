@@ -139,7 +139,7 @@ pub fn read_eval_keys_into<R: Read>(r: &mut R, ring: &Ring, sink: &mut impl KeyS
     if !read_flag(r)? {
         return Ok(false);
     }
-    let (Some(_), Some(preset)) = (&ring.bootstrap, &p.bootstrap) else {
+    let Some(preset) = &p.bootstrap else {
         return Err(invalid("bootstrapping keys for parameters without bootstrapping").into());
     };
     let (m, layout) = (module, &preset.keys_layout);

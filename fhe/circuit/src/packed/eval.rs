@@ -73,7 +73,7 @@ pub const CLEAN_EVERY: usize = 4;
 fn clean<E: Engine>(engine: &E, x: &E::Ct) -> Result<E::Ct> {
     let x2 = engine.mul(x, x)?;
     let x3 = engine.mul(&x2, x)?;
-    let mut h = x2.clone();
+    let mut h = engine.copy(&x2)?;
     engine.add_assign(&mut h, &x2)?;
     engine.add_assign(&mut h, &x2)?;
     engine.sub_assign(&mut h, &x3)?;
@@ -112,7 +112,7 @@ pub fn evaluate_inspected<E: Engine>(
     let mut report = Report::default();
     let mut state: Vec<E::Ct> = u.iter().zip(v).map(|(a, b)| engine.mul(a, b)).collect::<Result<_>>()?;
     let mut next_selector: Option<E::Ct> = None;
-    let mut acc: [Vec<Option<E::Ct>>; 2] = plan.token_cts.map(|n| vec![None; n]);
+    let mut acc: [Vec<Option<E::Ct>>; 2] = plan.token_cts.map(|n| (0..n).map(|_| None).collect());
 
     for (i, stage) in plan.stages.iter().enumerate() {
         let o = stage.orientation;

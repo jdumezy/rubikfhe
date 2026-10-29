@@ -42,7 +42,7 @@ impl Server {
     fn info(&self) -> ServerInfo {
         ServerInfo {
             version: PROTOCOL_VERSION,
-            backend: backend::NAME.to_string(),
+            backend: backend::DEVICE_NAME.to_string(),
             ckks_params: self.ckks.engine.read().unwrap().ring.params.name.clone(),
             key_id: *self.ckks.key_id.lock().unwrap(),
             stages: self.ckks.plan.stages.len() as u32,
@@ -60,6 +60,11 @@ impl Server {
         let mut counting = CountingReader { inner: reader, bytes: 0 };
         let keys = self.ckks.engine.read().unwrap().prepare_keys_from(&mut counting).context("receiving keys")?;
         self.ckks.engine.write().unwrap().set_keys(Some(keys));
+        if backend::ON_GPU {
+            let warm = Instant::now();
+            self.ckks.engine.read().unwrap().warm_up(&self.ckks.prepared).context("compiling the device kernels")?;
+            eprintln!("device kernels compiled in {:.0} ms", ms(warm));
+        }
         let key_id = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos() as u64;
         *self.ckks.key_id.lock().unwrap() = Some(key_id);
         let elapsed = ms(start);
@@ -86,8 +91,10 @@ impl Server {
                 let engine = self.ckks.engine.read().unwrap();
                 let n = self.ckks.plan.state_cts;
                 anyhow::ensure!(inputs.len() == 2 * n, "expected {} input ciphertexts", 2 * n);
-                let cts =
-                    inputs.iter().map(|b| ciphertext_from_bytes(&engine.ring, b)).collect::<io::Result<Vec<_>>>()?;
+                let cts = inputs
+                    .iter()
+                    .map(|b| Ok(engine.upload(&ciphertext_from_bytes(&engine.ring, b)?)))
+                    .collect::<io::Result<Vec<_>>>()?;
 
                 let stages = self.ckks.plan.stages.len() as u32;
                 let (refreshes, cleanings) = *self.last_report.lock().unwrap();
@@ -108,8 +115,12 @@ impl Server {
                 });
                 report_step(stages, Step::Output, 0.0);
                 let finished = result.and_then(|(out, report)| {
-                    let outputs =
-                        out.cols.iter().chain(&out.rows).map(ciphertext_to_bytes).collect::<io::Result<_>>()?;
+                    let outputs = out
+                        .cols
+                        .iter()
+                        .chain(&out.rows)
+                        .map(|c| Ok(ciphertext_to_bytes(&engine.download(c)?)?))
+                        .collect::<Result<_>>()?;
                     Ok((outputs, report))
                 });
                 *self.progress.lock().unwrap() = None;
@@ -190,12 +201,12 @@ fn main() -> Result<()> {
     let tables = Tables::new(&solver);
     let plan = PackedPlan::new(&tables, params.slots());
     let name = params.name.clone();
-    let engine = CkksEngine::new(Ring::new(params)?);
+    let engine = CkksEngine::new(Ring::new(params)?)?;
     let prepared = Prepared::new(&engine, &plan)?;
     let output_tokens = tables.output_len();
     eprintln!(
         "{} backend ({threads} threads), {name} parameters, circuit ready in {:.1} s",
-        backend::NAME,
+        backend::DEVICE_NAME,
         start.elapsed().as_secs_f64()
     );
 
