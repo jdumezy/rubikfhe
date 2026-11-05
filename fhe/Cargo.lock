@@ -3209,7 +3209,7 @@ dependencies = [
  "rustc_apfloat",
  "slotmap",
  "smallvec",
- "spin 0.9.9",
+ "spin 0.12.3",
  "thiserror 2.0.21",
  "utf8-chars",
 ]
@@ -3332,8 +3332,9 @@ dependencies = [
 
 [[package]]
 name = "poulpy-ckks"
-version = "0.9.0"
-source = "git+https://github.com/poulpy-fhe/poulpy?rev=6018905c5be25070a0e5b2b31759cb96468b5908#6018905c5be25070a0e5b2b31759cb96468b5908"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f90385e67398dc90b6b8e977fe4b527fdb19e20a49e5de4942c859a39866e352"
 dependencies = [
  "anyhow",
  "astro-float-num",
@@ -3348,8 +3349,9 @@ dependencies = [
 
 [[package]]
 name = "poulpy-core"
-version = "0.9.0"
-source = "git+https://github.com/poulpy-fhe/poulpy?rev=6018905c5be25070a0e5b2b31759cb96468b5908#6018905c5be25070a0e5b2b31759cb96468b5908"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f1b69ae6f736af1f7f09f3d3db2d37da600c65da2b65a8c2f513817a4f30882"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3367,8 +3369,9 @@ dependencies = [
 
 [[package]]
 name = "poulpy-cpu-arm"
-version = "0.9.0"
-source = "git+https://github.com/poulpy-fhe/poulpy?rev=6018905c5be25070a0e5b2b31759cb96468b5908#6018905c5be25070a0e5b2b31759cb96468b5908"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70775e4d49e3b1869a6ffa16a158127285632f83527db0b3d65bce2666cc05ff"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -3389,8 +3392,9 @@ dependencies = [
 
 [[package]]
 name = "poulpy-cpu-avx"
-version = "0.9.0"
-source = "git+https://github.com/poulpy-fhe/poulpy?rev=6018905c5be25070a0e5b2b31759cb96468b5908#6018905c5be25070a0e5b2b31759cb96468b5908"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a3d8e6235fb317aaf4325bcfc8d0203a702f9214472fed456b5bbdfaecaf1da"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -3410,8 +3414,9 @@ dependencies = [
 
 [[package]]
 name = "poulpy-cpu-avx512"
-version = "0.9.0"
-source = "git+https://github.com/poulpy-fhe/poulpy?rev=6018905c5be25070a0e5b2b31759cb96468b5908#6018905c5be25070a0e5b2b31759cb96468b5908"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "484f47d0f992c00588a63d18e5eb0b9b7db90e53dce205603478c3a654dbc9c2"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -3433,8 +3438,9 @@ dependencies = [
 
 [[package]]
 name = "poulpy-cpu-portable"
-version = "0.9.0"
-source = "git+https://github.com/poulpy-fhe/poulpy?rev=6018905c5be25070a0e5b2b31759cb96468b5908#6018905c5be25070a0e5b2b31759cb96468b5908"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16a82c805d4173ec3c0386450d74dc592951620468ddee51d0c6efe1e3d3e115"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3454,8 +3460,9 @@ dependencies = [
 
 [[package]]
 name = "poulpy-cpu-rayon"
-version = "0.9.0"
-source = "git+https://github.com/poulpy-fhe/poulpy?rev=6018905c5be25070a0e5b2b31759cb96468b5908#6018905c5be25070a0e5b2b31759cb96468b5908"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c77f428d01dfb71999b4d935f58686c6f2125c5a6a9f215e4160e402d8c976a7"
 dependencies = [
  "bytemuck",
  "poulpy-cpu-portable",
@@ -3465,8 +3472,9 @@ dependencies = [
 
 [[package]]
 name = "poulpy-gpu-portable"
-version = "0.9.0"
-source = "git+https://github.com/poulpy-fhe/poulpy?rev=6018905c5be25070a0e5b2b31759cb96468b5908#6018905c5be25070a0e5b2b31759cb96468b5908"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6030419666948f98cf8ab1aee0fc228c74f57e8bfc0a79a0801d337ad33c23cb"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3481,8 +3489,9 @@ dependencies = [
 
 [[package]]
 name = "poulpy-hal"
-version = "0.9.0"
-source = "git+https://github.com/poulpy-fhe/poulpy?rev=6018905c5be25070a0e5b2b31759cb96468b5908#6018905c5be25070a0e5b2b31759cb96468b5908"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20f0b5f199018884f8943c97a56abde6799cd8af2c165f9373fb79fb6fce258c"
 dependencies = [
  "anyhow",
  "bytemuck",

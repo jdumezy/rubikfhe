@@ -9,7 +9,8 @@ use std::io::{self, Read, Write};
 
 use poulpy_ckks::prelude::*;
 use poulpy_core::layouts::{
-    GLWEAutomorphismKey, GLWECIEmbedKey, GLWECITraceKey, GLWESwitchingKey, GLWETensorKey, LWEInfos, ModuleCoreAlloc,
+    GLWEAutomorphismKey, GLWEAutomorphismKeyAlloc, GLWECIEmbedKey, GLWECIEmbedKeyAlloc, GLWECITraceKey,
+    GLWECITraceKeyAlloc, GLWESwitchingKey, GLWESwitchingKeyAlloc, GLWETensorKey, GLWETensorKeyAlloc, LWEInfos,
 };
 use poulpy_hal::layouts::{Backend, ReaderFrom, WriterTo};
 
@@ -147,7 +148,12 @@ pub fn read_eval_keys_into<R: Read>(r: &mut R, ring: &Ring, sink: &mut impl KeyS
         let g = read_u64(r)? as i64;
         sink.bootstrap_rotation_key(
             g,
-            read_blob(r, m.glwe_automorphism_key_alloc_from_infos(&layout.rotation_key(g)))?,
+            read_blob(
+                r,
+                m.glwe_automorphism_key_alloc_from_infos(
+                    layout.rotation_keys.get(&g).ok_or_else(|| invalid("unexpected bootstrapping rotation key"))?,
+                ),
+            )?,
         )?;
     }
     sink.bootstrap_tensor_key(read_blob(r, m.glwe_tensor_key_alloc_from_infos(&layout.tensor_key))?)?;

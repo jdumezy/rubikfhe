@@ -14,25 +14,29 @@ use poulpy_ckks::api::{
     CKKSAllOpsTmpBytes, CKKSBootstrappingOps, CKKSCopyOps, CKKSEncodingHostOps, CKKSInnerSumOps,
     CKKSLinearTransformationOps,
 };
-use poulpy_ckks::encoding::ckks_encode_linear_transformation_from_diagonals;
+use poulpy_ckks::encoding::ckks_linear_transformation_encode_from_diagonals;
 use poulpy_ckks::layouts::{
-    BootstrappingContext, BootstrappingKeySet, BootstrappingKeysLayout, BootstrappingKeysPrepared, CKKSCiphertextOwned,
-    CKKSPlaintextOwned, ComplexDiagonals, EncapsulationKeys, EncodedLut, LinearTransformationPrepared,
+    BootstrappingContextPrepared, BootstrappingKeySet, BootstrappingKeysLayout, BootstrappingKeysPrepared,
+    CKKSCiphertextOwned, CKKSPlaintextOwned, ComplexDiagonals, EncapsulationKeys, EncodedLut,
+    LinearTransformationPrepared,
 };
 use poulpy_ckks::prelude::*;
 use poulpy_core::layouts::prepared::{GLWEAutomorphismKeyPrepared, GLWESwitchingKeyPrepared, GLWETensorKeyPrepared};
+use poulpy_core::layouts::prepared::{GLWEAutomorphismKeyPreparedBackendRef, GLWETensorKeyPreparedBackendRef};
 use poulpy_core::layouts::{
     BackendGLWEAutomorphismKey, BackendGLWEAutomorphismKeyPrepared, BackendGLWESecret, BackendGLWESecretPrepared,
     BackendGLWETensorKeyPrepared, Degree, Diagonals as CoreDiagonals, GGLWEBackendRef, GGLWEInfos, GGLWEToBackendRef,
     GGLWEViewMut, GLWEInfos, GLWESwitchingKeyDegrees, GLWETensorKey, GetGaloisElement, LWEInfos,
-    LinearTransformationLayout, LinearTransformationStrategy, ModuleCoreAlloc, optimal_bsgs_giant_step,
+    LinearTransformationLayout, LinearTransformationStrategy, optimal_bsgs_giant_step,
 };
 use poulpy_core::layouts::{GLWEAutomorphismKey, GLWECIEmbedKey, GLWECITraceKey, GLWESwitchingKey};
-use poulpy_core::layouts::{GetAutomorphismKey, TorusPrecision, prepared::GLWEAutomorphismKeyPreparedBackendRef};
+use poulpy_core::layouts::{
+    GLWEAutomorphismKeyAlloc, GLWESecretAlloc, GLWETensorKeyAlloc, GetAutomorphismKey, GetTensorKey, TorusPrecision,
+};
 use poulpy_core::{
-    GLWEAutomorphismKeyEncryptSk, GLWEAutomorphismKeyPreparedFactory, GLWEBytesOf, GLWESecretPreparedFactory,
+    GGLWEBytesOf, GLWEAutomorphismKeyEncryptSk, GLWEAutomorphismKeyPreparedFactory, GLWESecretPreparedFactory,
     GLWESecretSampling, GLWESwitchingKeyEncryptSk, GLWESwitchingKeyPreparedFactory, GLWETensorKeyEncryptSk,
-    GLWETensorKeyPreparedFactory, ScratchArenaTakeCore, TransferInto,
+    GLWETensorKeyPreparedFactory, ScratchArenaTakeGGLWE, TransferInto,
 };
 use poulpy_hal::api::{ModuleSynchronize, ScratchOwnedAlloc, ScratchOwnedBorrow};
 use poulpy_hal::layouts::{Backend, CyclotomicOrder, Module, ScratchArena, ScratchOwned};
@@ -62,15 +66,15 @@ fn pt_meta(log_delta: usize) -> GLWEPlaintextMeta {
 
 /// Bootstrapping context and LUT, compiled from the preset on the device.
 struct Bootstrap {
-    context: BootstrappingContext<Dev, f64>,
+    context: BootstrappingContextPrepared<Dev, f64>,
     lut: EncodedLut<CKKSPlaintextOwned<Dev>>,
 }
 
 impl Bootstrap {
     fn new(module: &Module<Dev>, params: &Params) -> Result<Option<Bootstrap>> {
         let Some(preset) = &params.bootstrap else { return Ok(None) };
-        let bytes = <Module<Dev> as CKKSEncodingHostOps<Dev, f64>>::ckks_reim_tmp_bytes(module, module.n());
-        let unprepared = BootstrappingContext::<Dev, f64>::compile_unprepared(
+        let bytes = BootstrappingContextPrepared::<Dev, f64>::compile_unprepared_tmp_bytes(module, &preset.plan)?;
+        let unprepared = BootstrappingContextPrepared::<Dev, f64>::compile_unprepared(
             module,
             preset.base2k.into(),
             &preset.plan,
@@ -216,7 +220,7 @@ impl Ring {
         // gadget covers the circuit's widest ciphertexts (some are narrower).
         let shared = |g: i64| {
             let Some((b, preset)) = bootstrap.as_ref().zip(p.bootstrap.as_ref()) else { return false };
-            let layout = preset.keys_layout.rotation_key(g);
+            let Some(layout) = preset.keys_layout.rotation_keys.get(&g) else { return false };
             b.rotation_keys.contains_key(&g) && (layout.dnum.0 * layout.k_digit.0) as usize >= p.fresh_k
         };
         for &g in galois_elements.iter().filter(|&&g| !shared(g)) {
@@ -232,9 +236,9 @@ impl Ring {
     pub fn encrypt(&self, sk: &SecretKey, values: &[f64], seed: [u8; 32]) -> Result<Ciphertext> {
         let p = &self.params;
         let mut scratch = self.scratch();
-        let mut pt = self.module.ckks_pt_vec_alloc(p.slots(), p.base2k.into(), p.fresh_k.into());
+        let mut pt = self.module.ckks_plaintext_alloc_from_slots(p.slots(), p.base2k.into(), p.fresh_k.into());
         pt.set_meta(pt_meta(p.log_delta));
-        self.module.ckks_encode_reim_into(&mut pt, values, &vec![0.0; values.len()], &mut scratch.borrow())?;
+        self.module.ckks_encode_slots_host_into(&mut pt, values, &vec![0.0; values.len()], &mut scratch.borrow())?;
         let mut ct = self.module.ckks_ciphertext_alloc_from_glwe_infos(&p.glwe_layout());
         let mut xe = Source::new([seed, [0x17; 32]].concat()[24..56].try_into().unwrap());
         self.module.ckks_encrypt_sk(
@@ -253,11 +257,12 @@ impl Ring {
         let p = &self.params;
         let mut scratch = self.scratch();
         let budget = ct.log_budget().min(PT_INTEGER_BITS + 8);
-        let mut pt = self.module.ckks_pt_vec_alloc(p.slots(), p.base2k.into(), (ct.log_delta() + budget).into());
+        let mut pt =
+            self.module.ckks_plaintext_alloc_from_slots(p.slots(), p.base2k.into(), (ct.log_delta() + budget).into());
         pt.set_meta(ct.meta());
         self.module.ckks_decrypt(&mut pt, ct, &sk.prepared, &mut scratch.borrow())?;
         let (mut re, mut im) = (vec![0.0; p.slots()], vec![0.0; p.slots()]);
-        self.module.ckks_decode_reim_into(&pt, &mut re, &mut im, &mut scratch.borrow())?;
+        self.module.ckks_decode_slots_host_into(&pt, &mut re, &mut im, &mut scratch.borrow())?;
         Ok(re)
     }
 }
@@ -344,7 +349,11 @@ impl CkksEngine {
     /// The circuit's rotation keys, falling back on the bootstrapping keys.
     fn rotations(&self) -> Result<Rotations<'_>> {
         let keys = self.keys()?;
-        Ok(Rotations { own: &keys.rotation_keys, shared: keys.bootstrap.as_ref().map(|b| &b.rotation_keys) })
+        Ok(Rotations {
+            own: &keys.rotation_keys,
+            shared: keys.bootstrap.as_ref().map(|b| &b.rotation_keys),
+            tensor_key: &keys.tensor_key,
+        })
     }
 
     fn keys(&self) -> Result<&PreparedKeys> {
@@ -420,11 +429,14 @@ impl Engine for CkksEngine {
 
     fn encode(&self, values: &[f64]) -> Result<Plaintext> {
         let p = &self.ring.params;
-        let mut pt =
-            self.module.ckks_pt_vec_alloc(p.slots(), p.base2k.into(), (p.pt_log_delta + PT_INTEGER_BITS).into());
+        let mut pt = self.module.ckks_plaintext_alloc_from_slots(
+            p.slots(),
+            p.base2k.into(),
+            (p.pt_log_delta + PT_INTEGER_BITS).into(),
+        );
         pt.set_meta(pt_meta(p.pt_log_delta));
         let scratch = &mut self.scratch.lock().unwrap().1;
-        self.module.ckks_encode_reim_into(&mut pt, values, &vec![0.0; values.len()], &mut scratch.borrow())?;
+        self.module.ckks_encode_slots_host_into(&mut pt, values, &vec![0.0; values.len()], &mut scratch.borrow())?;
         Ok(pt)
     }
 
@@ -437,10 +449,11 @@ impl Engine for CkksEngine {
         }
         let indexes: Vec<i64> = diagonals.keys().map(|&i| i as i64).collect();
         let module = &self.module;
-        let (lt, plan) = {
+        let ct = self.alloc_like(p.fresh_k);
+        let (lt, bytes) = {
             let mut guard = self.scratch.lock().unwrap();
             let scratch = &mut guard.1;
-            let lt = ckks_encode_linear_transformation_from_diagonals(
+            let lt = ckks_linear_transformation_encode_from_diagonals(
                 module,
                 p.base2k.into(),
                 CoeffsMeta::from_delta_budget(p.pt_log_delta, PT_INTEGER_BITS),
@@ -452,17 +465,19 @@ impl Engine for CkksEngine {
             let first = lt.first_diagonal_plaintext().context("empty gather map")?;
             let mut prepared =
                 LinearTransformationPrepared::<Dev>::alloc_prepared_from_index(module, &lt.index(), first);
-            module.ckks_prepare_linear_transformation_rhs(&mut prepared, &lt, &mut scratch.borrow())?;
-            (prepared, lt.index())
+            module.ckks_linear_transformation_rhs_prepare(&mut prepared, &lt, &mut scratch.borrow())?;
+            // The evaluation carves its baby steps from the scratch.
+            let bytes = module.ckks_linear_transformation_eval_self_tmp_bytes(
+                false,
+                &ct,
+                first,
+                &lt.index(),
+                &p.tensor_key_layout(),
+                &p.rotation_key_layout(),
+            );
+            (prepared, bytes)
         };
-        let ct = self.alloc_like(p.fresh_k);
-        let atk = p.rotation_key_layout();
-        self.reserve_scratch(
-            module
-                .ckks_eval_linear_transformation_tmp_bytes(&ct, &plan, &atk)
-                .max(module.ckks_prepare_linear_transformation_baby_steps_tmp_bytes(&ct, &plan, &atk))
-                + self.ops_scratch_bytes(),
-        );
+        self.reserve_scratch(bytes);
         Ok(lt)
     }
 
@@ -502,7 +517,7 @@ impl Engine for CkksEngine {
     fn apply_lt(&self, a: &DeviceCiphertext, lt: &Self::Lt) -> Result<DeviceCiphertext> {
         let mut out = self.alloc_like(a.k().as_usize());
         let scratch = &mut self.scratch.lock().unwrap().1;
-        self.module.ckks_eval_linear_transformation_self_into(
+        self.module.ckks_linear_transformation_eval_self_into(
             &mut out,
             a,
             lt,
@@ -676,7 +691,7 @@ impl<'a> Preparing<'a> {
         let module = &self.engine.module;
         let (mut moved, mut rest) = self.scratch.borrow().take_gglwe_scratch(key);
         key.transfer_into(&mut moved);
-        let mut prepared = module.alloc_tensor_key_prepared_from_infos(key);
+        let mut prepared = module.glwe_tensor_key_prepared_alloc_from_infos(key);
         module.glwe_tensor_key_prepare(&mut prepared, &moved, &mut rest);
         prepared
     }
@@ -783,10 +798,18 @@ impl CkksEngine {
     }
 }
 
-/// Rotation keys of the circuit, then those of the bootstrap.
+/// Rotation keys of the circuit, then those of the bootstrap, and the
+/// circuit's tensor key, which linear transformations also take.
 struct Rotations<'a> {
     own: &'a std::collections::HashMap<i64, BackendGLWEAutomorphismKeyPrepared<Dev>>,
     shared: Option<&'a std::collections::HashMap<i64, GLWEAutomorphismKeyPrepared<DevBuf, Dev>>>,
+    tensor_key: &'a BackendGLWETensorKeyPrepared<Dev>,
+}
+
+impl GetTensorKey<Dev> for Rotations<'_> {
+    fn lookup_tensor_key(&self, k: TorusPrecision) -> poulpy_core::Result<GLWETensorKeyPreparedBackendRef<'_, Dev>> {
+        self.tensor_key.lookup_tensor_key(k)
+    }
 }
 
 impl GetAutomorphismKey<Dev> for Rotations<'_> {

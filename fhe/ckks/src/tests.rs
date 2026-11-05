@@ -429,9 +429,9 @@ fn secure_parameters_fit_the_modulus_bounds() {
 #[ignore = "probe: the secure functional bootstrap rounds noisy bits"]
 fn functional_preset_cleans_noisy_bits() {
     use poulpy_ckks::api::CKKSBootstrappingOps;
-    use poulpy_ckks::layouts::BootstrappingContext;
+    use poulpy_ckks::layouts::BootstrappingContextPrepared;
     use poulpy_ckks::prelude::*;
-    use poulpy_core::layouts::{GLWELayout, LWEInfos, ModuleCoreAlloc, Rank};
+    use poulpy_core::layouts::{GLWELayout, GLWESecretAlloc, LWEInfos, Rank};
     use poulpy_core::{GLWESecretPreparedFactory, GLWESecretSampling};
     use poulpy_hal::api::{ScratchOwnedAlloc, ScratchOwnedBorrow};
     use poulpy_hal::layouts::{Module, ScratchOwned};
@@ -443,13 +443,11 @@ fn functional_preset_cleans_noisy_bits() {
     let (n, base2k) = (1usize << preset.log_n, preset.base2k);
     let keys = &preset.keys_layout;
     eprintln!(
-        "input k {}, output k {}, bootstrap k {}; wide key dnum {} digit {} aux {}; d2s k {} s2d k {}",
+        "input k {}, output k {}, bootstrap k {}; {} rotation key layouts; d2s k {} s2d k {}",
         preset.input_k,
         preset.output_k,
         preset.bootstrap_k,
-        keys.automorphism_key.dnum.as_usize(),
-        keys.automorphism_key.k_digit.as_usize(),
-        keys.automorphism_key.k_aux.as_usize(),
+        keys.rotation_key_layouts().len(),
         keys.encapsulation.as_ref().unwrap().dense_to_sparse.k().as_usize(),
         keys.encapsulation.as_ref().unwrap().sparse_to_dense.as_ref().unwrap().k().as_usize(),
     );
@@ -458,7 +456,8 @@ fn functional_preset_cleans_noisy_bits() {
     let mut scratch = ScratchOwned::<Be>::alloc(1 << 31);
     let t = Instant::now();
     let ctx =
-        BootstrappingContext::<Be, f64>::compile(&module, base2k.into(), &preset.plan, &mut scratch.borrow()).unwrap();
+        BootstrappingContextPrepared::<Be, f64>::compile(&module, base2k.into(), &preset.plan, &mut scratch.borrow())
+            .unwrap();
     let sk_layout = GLWELayout { n: n.into(), base2k: base2k.into(), k: preset.bootstrap_k.into(), rank: Rank(1) };
     let mut sk_raw = module.glwe_secret_alloc_from_infos(&sk_layout);
     module.glwe_secret_fill_ternary_hw(&mut sk_raw, preset.dense_hamming_weight, &mut Source::new([5; 32]));
@@ -490,13 +489,13 @@ fn functional_preset_cleans_noisy_bits() {
     for (run, noise) in [0.0, 0.01, 0.05, 0.1, 0.2].into_iter().enumerate() {
         let noisy: Vec<f64> =
             bits.iter().enumerate().map(|(i, b)| b + noise * (((i * 37) % 11) as f64 / 5.0 - 1.0)).collect();
-        let mut pt = module.ckks_pt_vec_alloc(m, base2k.into(), preset.input_k.into());
+        let mut pt = module.ckks_plaintext_alloc_from_slots(m, base2k.into(), preset.input_k.into());
         pt.set_meta(GLWEPlaintextMeta {
             scale: Scale::Log(preset.log_delta),
             slots: SlotsKind::Complex,
             log_sparsity: 0,
         });
-        module.ckks_encode_reim_into(&mut pt, &noisy, &vec![0.0; m], &mut scratch.borrow()).unwrap();
+        module.ckks_encode_slots_host_into(&mut pt, &noisy, &vec![0.0; m], &mut scratch.borrow()).unwrap();
         let mut ct = module.ckks_ciphertext_alloc_from_glwe_infos(&in_layout);
         module
             .ckks_encrypt_sk(
@@ -525,11 +524,11 @@ fn functional_preset_cleans_noisy_bits() {
             .unwrap();
         let ms = t.elapsed().as_millis();
         let out = &outputs[0];
-        let mut dec = module.ckks_pt_vec_alloc(m, base2k.into(), (out.log_delta() + 8).into());
+        let mut dec = module.ckks_plaintext_alloc_from_slots(m, base2k.into(), (out.log_delta() + 8).into());
         dec.set_meta(out.meta());
         module.ckks_decrypt(&mut dec, out, &sk, &mut scratch.borrow()).unwrap();
         let (mut re, mut im) = (vec![0.0; m], vec![0.0; m]);
-        module.ckks_decode_reim_into(&dec, &mut re, &mut im, &mut scratch.borrow()).unwrap();
+        module.ckks_decode_slots_host_into(&dec, &mut re, &mut im, &mut scratch.borrow()).unwrap();
         let err = re.iter().zip(&bits).map(|(r, b)| (r - b).abs()).fold(0.0, f64::max);
         if run == 0 {
             eprintln!("output k {} log_delta {} budget {}", out.k().as_usize(), out.log_delta(), out.log_budget());

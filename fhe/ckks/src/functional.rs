@@ -7,6 +7,8 @@
 //! layouts the way poulpy's preset builder does, checking every key against
 //! the 128-bit modulus bounds of its secret.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, ensure};
 use poulpy_ckks::CoeffsMeta;
 use poulpy_ckks::layouts::{
@@ -101,16 +103,17 @@ impl FunctionalPreset {
         );
 
         let keys = Shape { log_n, base2k };
-        let wide = keys.key_layout(
-            "high-modulus",
-            bootstrap_k,
-            keys.widest_k_digit(bootstrap_k, DENSE_MAX_MODULUS),
-            DENSE_MAX_MODULUS,
-        )?;
+        // A key only used on narrower ciphertexts takes the digit of fewest rows those admit.
+        let widths = plan.key_widths(log_n, bootstrap_k, input_k, log_delta);
+        let shape = |name, k| keys.key_layout(name, k, keys.widest_k_digit(k, DENSE_MAX_MODULUS), DENSE_MAX_MODULUS);
+        let rotation_keys = widths
+            .rotation_keys
+            .iter()
+            .map(|(&p, &k)| Ok((p, shape("rotation", k)?.into())))
+            .collect::<Result<BTreeMap<_, _>>>()?;
         let keys_layout = BootstrappingKeysLayout {
-            automorphism_key: wide.into(),
-            rotation_keys: Default::default(),
-            tensor_key: wide.into(),
+            rotation_keys,
+            tensor_key: shape("tensor", widths.tensor_key)?.into(),
             encapsulation: Some(EncapsulationKeysLayout {
                 dense_to_sparse: keys.key_layout("dense-to-sparse", log_modulus, base2k, SPARSE_MAX_MODULUS)?.into(),
                 sparse_to_dense: Some(
@@ -141,7 +144,9 @@ impl FunctionalPreset {
     /// Every key within the modulus bound of the secret it is encrypted under.
     fn validate(&self) -> Result<()> {
         let keys = &self.keys_layout;
-        validate_key("automorphism", &keys.automorphism_key, DENSE_MAX_MODULUS)?;
+        for key in keys.rotation_keys.values() {
+            validate_key("rotation", key, DENSE_MAX_MODULUS)?;
+        }
         validate_key("tensor", &keys.tensor_key, DENSE_MAX_MODULUS)?;
         let enc = keys.encapsulation.as_ref().context("missing encapsulation keys")?;
         validate_key("dense-to-sparse", &enc.dense_to_sparse, SPARSE_MAX_MODULUS)?;
