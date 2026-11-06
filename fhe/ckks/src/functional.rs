@@ -50,7 +50,7 @@ pub struct FunctionalPreset {
     pub input_k: usize,
     /// Width of a ciphertext leaving it.
     pub output_k: usize,
-    /// Working width of the bootstrap, in whole limbs.
+    /// Working width of the bootstrap.
     pub bootstrap_k: usize,
     pub dense_hamming_weight: usize,
 }
@@ -67,9 +67,9 @@ impl std::fmt::Debug for FunctionalPreset {
 }
 
 impl FunctionalPreset {
-    /// Bootstraps inputs of scale `2^log_delta` to outputs of at least
-    /// `min_output_k` bits, with the plan and radix of `base`.
-    pub fn new(base: &BootstrappingPreset, log_delta: usize, min_output_k: usize) -> Result<FunctionalPreset> {
+    /// Bootstraps inputs of scale `2^log_delta` to outputs of `output_k` bits,
+    /// with the plan and radix of `base`.
+    pub fn new(base: &BootstrappingPreset, log_delta: usize, output_k: usize) -> Result<FunctionalPreset> {
         let (log_n, base2k) = (base.n().trailing_zeros() as usize, base.base2k());
         ensure!(log_n == 16, "the modulus bounds are those of N = 2^16");
         ensure!(
@@ -93,9 +93,7 @@ impl FunctionalPreset {
 
         let log_modulus = log_delta + lut.log_msg_ratio();
         let input_k = plan.input_k(log_modulus);
-        let overhead = plan.functional_bootstrap_k(0, log_delta, &lut)?;
-        let bootstrap_k = (min_output_k + overhead).next_multiple_of(base2k);
-        let output_k = bootstrap_k - overhead;
+        let bootstrap_k = plan.functional_bootstrap_k(output_k, log_delta, &lut)?;
         ensure!(output_k > input_k, "output width {output_k} must exceed the input width {input_k}");
         ensure!(
             bootstrap_k <= DENSE_MAX_MODULUS,
